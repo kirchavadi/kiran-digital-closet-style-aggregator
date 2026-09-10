@@ -1,0 +1,30 @@
+{
+  "saboskirt.com": {
+    "raw_count": 5148,
+    "normalized_count": 5148
+  },
+  "petalandpup.com": {
+    "raw_count": 6108,
+    "normalized_count": 6108
+  },
+  "meshki.us": {
+    "raw_count": 2290,
+    "normalized_count": 2290
+  },
+  "bohme.com": {
+    "raw_count": 8896,
+    "normalized_count": 8896
+  },
+  "naturallife.com": {
+    "raw_count": 1350,
+    "normalized_count": 1350
+  },
+  "ohpolly.com": {
+    "raw_count": 3424,
+    "normalized_count": 3424
+  },
+  "reddress.com": {
+    "raw_count": 6952,
+    "normalized_count": 6952
+  }
+}
