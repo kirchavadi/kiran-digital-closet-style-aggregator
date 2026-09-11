@@ -229,7 +229,7 @@ def build_complementary_query(attributes: dict, broaden: bool = False,
             "max_tokens": 400,
             "temperature": 0.3,
         },
-        timeout=20,
+        timeout=60,
     )
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"]

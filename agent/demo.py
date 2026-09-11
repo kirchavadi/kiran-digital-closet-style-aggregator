@@ -28,7 +28,7 @@ def scenario_happy_path(app):
 
     config = {"configurable": {"thread_id": "demo-happy-1"}}
     initial = {
-        "image_path": "/mnt/user-data/uploads/closet_top.jpg",
+        "image_path": "test_images/closet_top.jpg",
         "user_id": "kiran-demo-user",
     }
 
@@ -41,21 +41,26 @@ def scenario_happy_path(app):
         result = app.invoke(initial, config)
 
     print(f"Vision confidence: {result['vision_confidence']}")
+    print(f"Status message: {result.get('status_message')}")
+
     if result.get("ranked_recommendations"):
         print(f"Recommendations: {[r['name'] for r in result['ranked_recommendations']]}")
         print(f"Styling note: {result['styling_note']}")
 
-    # Graph paused before save_to_digital_closet (interrupt_before). This is
-    # the human-in-the-loop gate. Simulate the user clicking "save" on the
-    # first card, then resume the graph.
-    print("\n[human-in-the-loop] User clicks 'Save' on the first recommendation...")
-    app.update_state(config, {
-        "user_wants_to_save": True,
-        "approved_item_id": result["ranked_recommendations"][0]["id"],
-    })
-    final = app.invoke(None, config)  # resume from the interrupt
-    print(f"Saved: {final.get('saved')}")
-    print_trace(final)
+        # Graph paused before save_to_digital_closet (interrupt_before). This is
+        # the human-in-the-loop gate. Simulate the user clicking "save" on the
+        # first card, then resume the graph.
+        print("\n[human-in-the-loop] User clicks 'Save' on the first recommendation...")
+        app.update_state(config, {
+            "user_wants_to_save": True,
+            "approved_item_id": result["ranked_recommendations"][0]["id"],
+        })
+        final = app.invoke(None, config)  # resume from the interrupt
+        print(f"Saved: {final.get('saved')}")
+        print_trace(final)
+    else:
+        print("No recommendations to save -- skipping the save step for this run.")
+        print_trace(result)
 
 
 def scenario_low_confidence(app):
@@ -65,7 +70,7 @@ def scenario_low_confidence(app):
 
     config = {"configurable": {"thread_id": "demo-lowconf-1"}}
     initial = {
-        "image_path": "/mnt/user-data/uploads/blurry_photo.jpg",
+        "image_path": "test_images/blurry_photo.jpg",
         "user_id": "kiran-demo-user",
     }
     result = app.invoke(initial, config)
@@ -86,7 +91,7 @@ def scenario_search_failure(app):
 
     config = {"configurable": {"thread_id": "demo-searchfail-1"}}
     initial = {
-        "image_path": "/mnt/user-data/uploads/closet_top.jpg",
+        "image_path": "test_images/closet_top.jpg",
         "user_id": "kiran-demo-user",
         "_force_search_failure_once": True,
     }
@@ -103,7 +108,7 @@ def scenario_zero_results(app):
 
     config = {"configurable": {"thread_id": "demo-zeroresults-1"}}
     initial = {
-        "image_path": "/mnt/user-data/uploads/closet_top.jpg",
+        "image_path": "test_images/closet_top.jpg",
         "user_id": "kiran-demo-user",
         "_force_zero_results": True,
     }
@@ -122,7 +127,7 @@ def scenario_vision_total_failure(app):
     print("=" * 60)
     config = {"configurable": {"thread_id": "demo-visionfail-1"}}
     initial = {
-        "image_path": "/mnt/user-data/uploads/closet_top.jpg",
+        "image_path": "test_images/closet_top.jpg",
         "user_id": "kiran-demo-user",
         "_force_vision_failure": True,
     }
@@ -137,7 +142,7 @@ def scenario_build_query_total_failure(app):
     print("=" * 60)
     config = {"configurable": {"thread_id": "demo-buildqueryfail-1"}}
     initial = {
-        "image_path": "/mnt/user-data/uploads/closet_top.jpg",
+        "image_path": "test_images/closet_top.jpg",
         "user_id": "kiran-demo-user",
         "_force_build_query_failure": True,
     }
