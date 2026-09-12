@@ -18,11 +18,11 @@ Tool inventory (per Section 3 / Section 6 of the ledger):
   - rank_and_style             (orchestration LLM call)
 """
 
+import base64
 import json
+import mimetypes
 import os
-import random
 import re
-import time
 
 import requests
 from PIL import Image
@@ -145,42 +145,307 @@ def _to_candidate(product_id: str, metadata: dict, score: float) -> dict:
 
 
 # ----------------------------------------------------------------------
-# Vision extraction (Qwen2.5-VL originally, now GLM-5.3-Flash per ledger)
+# Vision extraction -- GLM-5.3-Flash via Fireworks (primary) / Nebius
+# (fallback). REAL as of step 4 + garment_type correction (applied here
+# together, in one merged pass).
 # ----------------------------------------------------------------------
+
+# Mirrors backfill_attributes.py's NECK_TYPES / SLEEVE_TYPES / PATTERNS /
+# SILHOUETTES exactly, so a live user upload and the catalog backfill agree
+# on the same enum values. Keep these two lists in sync by hand until
+# they're pulled into one shared constants module (flagged as known
+# duplication debt, not fixed here to keep this a single-purpose diff).
+NECK_TYPES = [
+    "v-neck", "round neck", "boat neck", "halter", "off shoulder",
+    "sweetheart", "collared", "turtleneck", "cowl", "square neck",
+    "high neck", "scoop neck", "bateau",
+]
+
+SLEEVE_TYPES = [
+    "sleeveless", "short sleeve", "long sleeve", "3/4 sleeve",
+    "cap sleeve", "puff sleeve", "strapless",
+]
+
+PATTERNS = [
+    "floral", "striped", "solid", "polka dot", "animal print",
+    "plaid", "checked", "geometric", "abstract",
+]
+
+SILHOUETTES = [
+    "a-line", "bodycon", "wrap", "cut out", "fitted", "relaxed",
+    "oversized", "structured", "flowy",
+]
+
+# primary_color is deliberately NOT a controlled vocab -- color language is
+# open-ended ("sage green", "dusty rose") and build_complementary_query
+# already treats it as free text. Only empty/garbage values are rejected,
+# never off-list ones.
+
+GARMENT_TYPES = ["top", "bottom", "dress", "outerwear", "accessory"]
+
+# Which of the other 4 extracted fields are actually expected to be
+# determinable for a given garment_type -- fixes the "pants unfairly
+# penalized to 0.6 confidence" problem: neck_type/sleeve_type are dropped
+# from the denominator entirely for bottoms and accessories, instead of
+# counting as "missing" against a fixed field count.
+FIELD_APPLICABILITY = {
+    "top":       ["neck_type", "sleeve_type", "pattern", "silhouette", "primary_color"],
+    "dress":     ["neck_type", "sleeve_type", "pattern", "silhouette", "primary_color"],
+    "outerwear": ["neck_type", "sleeve_type", "pattern", "silhouette", "primary_color"],
+    "bottom":    ["pattern", "silhouette", "primary_color"],
+    "accessory": ["pattern", "primary_color"],
+}
+
+GARMENT_TYPE_ALIASES = {
+    "top": "top", "tops": "top",
+    "bottom": "bottom", "bottoms": "bottom",
+    "dress": "dress", "dresses": "dress",
+    "outerwear": "outerwear", "outerwears": "outerwear",
+    "accessory": "accessory", "accessories": "accessory",
+}
+
+VISION_SYSTEM_PROMPT = (
+    "Respond with ONLY the JSON object, no reasoning, no explanation, no "
+    "markdown code fences."
+)
+
+VISION_PROMPT = """You are tagging a single fashion item photo uploaded by a
+user to their digital closet. Look at the image and return ONLY a JSON
+object with any of these fields you can confidently determine. Omit a field
+entirely if unsure -- do not guess.
+
+{
+  "garment_type": one of """ + json.dumps(GARMENT_TYPES) + """ -- choose this first, before the other fields,
+  "neck_type": one of """ + json.dumps(NECK_TYPES) + """,
+  "sleeve_type": one of """ + json.dumps(SLEEVE_TYPES) + """,
+  "pattern": one of """ + json.dumps(PATTERNS) + """,
+  "silhouette": one of """ + json.dumps(SILHOUETTES) + """,
+  "primary_color": the item's dominant color, as a short free-text phrase (e.g. "black", "sage green")
+}
+"""
+
+FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
+FIREWORKS_MODEL = "accounts/fireworks/models/glm-5p3-flash"
+NEBIUS_URL = "https://api.tokenfactory.nebius.com/v1/chat/completions"
+NEBIUS_MODEL = "zai-org/GLM-5.3-Flash"
+
+
+def _encode_image_data_uri(image_path: str) -> str:
+    """
+    Base64 data-URI encode the user's uploaded photo for the chat-completions
+    image_url field. Unlike backfill_attributes.py (which points at a
+    catalog product's already-public image_url), this is a local file from
+    the upload -- there's no URL to hand the API, so it has to be inlined.
+    Raises ToolError (not a bare PIL/OSError) on a missing/corrupt file.
+    """
+    try:
+        with Image.open(image_path) as img:
+            img.verify()
+    except (FileNotFoundError, OSError) as e:
+        raise ToolError(f"vision_extract_attributes: couldn't open image_path {image_path!r}: {e}")
+
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if not mime_type or not mime_type.startswith("image/"):
+        mime_type = "image/jpeg"  # closet photos are almost always jpg/png; safe default
+
+    with open(image_path, "rb") as f:
+        raw = f.read()
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime_type};base64,{b64}"
+
+
+def _extract_json(content: str) -> dict:
+    """Same fix as the ledger's GLM-5.3-Flash note: pull the JSON object out
+    with a DOTALL regex rather than a naive strip/json.loads, since the
+    model can still wrap it in commentary even with the reasoning-
+    suppression system prompt."""
+    if not content:
+        raise ValueError("empty response content")
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not match:
+        raise ValueError(f"no JSON object found in response: {content[:200]!r}")
+    return json.loads(match.group(0))
+
+
+def _match_vocab_tolerant(value, vocab):
+    """
+    Like the exact-match vocab check used for neck_type/sleeve_type/pattern/
+    silhouette below, but tolerant of a singular/plural mismatch specifically
+    (e.g. the model saying "tops" when the vocab says "top"). Needed for
+    garment_type because target_category elsewhere in this codebase already
+    uses the plural form ("bottoms", "outerwear", "accessories"), so a model
+    conflating the two spellings is a real, likely failure mode.
+
+    Uses an explicit alias map (GARMENT_TYPE_ALIASES) rather than a generic
+    "strip a trailing s" heuristic -- a naive rstrip("s") approach fails on
+    "dress"/"dresses" specifically, because "dress" already ends in an "s"
+    that isn't a plural marker.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    if v in vocab:
+        return v
+    canonical = GARMENT_TYPE_ALIASES.get(v)
+    if canonical in vocab:
+        return canonical
+    return None
+
+
+def _validate_and_clean(parsed: dict) -> dict:
+    """Controlled-vocab drop behavior -- a value outside the enum is
+    dropped, not kept as free text, so Pinecone metadata / text_query
+    wording stays consistent with the catalog side. primary_color is exempt
+    (see note above)."""
+    clean = {}
+
+    garment_type = _match_vocab_tolerant(parsed.get("garment_type"), GARMENT_TYPES)
+    if garment_type:
+        clean["garment_type"] = garment_type
+
+    for field, vocab in [
+        ("neck_type", NECK_TYPES), ("sleeve_type", SLEEVE_TYPES),
+        ("pattern", PATTERNS), ("silhouette", SILHOUETTES),
+    ]:
+        val = parsed.get(field)
+        val = val.strip().lower() if isinstance(val, str) else None
+        if val in vocab:
+            clean[field] = val
+
+    color = parsed.get("primary_color")
+    if isinstance(color, str) and color.strip():
+        clean["primary_color"] = color.strip().lower()
+
+    return clean
+
+
+def _compute_confidence(clean_attributes: dict) -> float:
+    """
+    garment_type itself is always expected (every photo has SOME garment
+    type) and is weighted the same as one applicable field. The other 4
+    fields are only counted against the subset FIELD_APPLICABILITY says is
+    expected for that garment_type -- so a bottom-item photo is graded out
+    of 4 total (garment_type + 3 applicable fields), not 6.
+
+    If garment_type itself couldn't be determined, there's no way to know
+    which fields even apply -- falls back to grading against the full
+    5-field set (garment_type absent counts as a miss, same as any other
+    field). This is deliberately the *harshest* case, not a lenient
+    default: an image the model can't even categorize should score low.
+    """
+    garment_type = clean_attributes.get("garment_type")
+    if garment_type and garment_type in FIELD_APPLICABILITY:
+        applicable = FIELD_APPLICABILITY[garment_type]
+    else:
+        applicable = ["neck_type", "sleeve_type", "pattern", "silhouette", "primary_color"]
+
+    total = len(applicable) + 1  # +1 for garment_type itself
+    hit = sum(1 for f in applicable if f in clean_attributes)
+    hit += 1 if garment_type else 0
+    return round(hit / total, 2)
+
+
+def _call_glm(url: str, model: str, api_key: str, image_data_uri: str, timeout: int = 30) -> str:
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "max_tokens": 800,  # >= 600 per ledger; headroom above the observed minimum
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ],
+            },
+        ],
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    response_json = resp.json()
+    choice = response_json["choices"][0]
+    content = choice["message"].get("content")
+    if not content:
+        raise ValueError(f"empty content, finish_reason={choice.get('finish_reason')!r}")
+    return content
+
 
 def vision_extract_attributes(image_path: str, simulate_failure: bool = False) -> dict:
     """
-    STUB. Returns a plausible attribute set + a confidence score.
+    REAL IMPLEMENTATION (step 4, garment_type-aware). Same signature/return
+    shape as the old stub: {"attributes": {...}, "confidence": float 0.0-1.0}.
 
-    REAL IMPLEMENTATION:
-      Call GLM-5.3-Flash via Fireworks or Nebius (see backfill_attributes.py's
-      call_vision_model / call_vision_model_nebius for the exact request shape
-      and the re.search(r'{.*}', content, re.DOTALL) JSON-extraction fix).
-      Parse the JSON response into {neck_type, sleeve_type, pattern,
-      silhouette}, and additionally derive a confidence score (e.g. from
-      logprobs if available, or from how many fields the model returned vs.
-      how many it was asked for).
+    Provider order per the ledger's Sept 6, 2026 decision: try Fireworks
+    first; on ANY exception (HTTP error, timeout, malformed/empty response,
+    JSON-parse failure), retry once against Nebius before giving up. Only
+    raises ToolError -- letting graph.py's call_with_retry take one more
+    full pass at both providers -- if Nebius also fails (or isn't
+    configured).
     """
     if simulate_failure:
         raise ToolError("Vision model request failed")
 
-    time.sleep(0.1)  # pretend this is a network call
-    stub_attributes = {
-        "neck_type": "v-neck",
-        "sleeve_type": "sleeveless",
-        "pattern": "solid",
-        "silhouette": "fitted",
-        "primary_color": "black",
-    }
-    # Randomized confidence so the demo can show BOTH branches (confident /
-    # low-confidence re-upload) across a few runs.
-    confidence = round(random.uniform(0.55, 0.98), 2)
-    return {"attributes": stub_attributes, "confidence": confidence}
+    image_data_uri = _encode_image_data_uri(image_path)
+
+    fireworks_key = os.environ.get("FIREWORKS_API_KEY")
+    nebius_key = os.environ.get("NEBIUS_API_KEY")
+
+    last_err = None
+    parsed = None
+
+    if fireworks_key:
+        try:
+            content = _call_glm(FIREWORKS_URL, FIREWORKS_MODEL, fireworks_key, image_data_uri)
+            parsed = _extract_json(content)
+        except Exception as e:
+            last_err = e
+    else:
+        last_err = RuntimeError("FIREWORKS_API_KEY not set")
+
+    if parsed is None:
+        if nebius_key:
+            try:
+                content = _call_glm(NEBIUS_URL, NEBIUS_MODEL, nebius_key, image_data_uri)
+                parsed = _extract_json(content)
+            except Exception as e:
+                last_err = e
+        elif last_err is None:
+            last_err = RuntimeError("NEBIUS_API_KEY not set")
+
+    if parsed is None:
+        raise ToolError(f"vision_extract_attributes: both providers failed -- {last_err}")
+
+    attributes = _validate_and_clean(parsed)
+    confidence = _compute_confidence(attributes)
+    return {"attributes": attributes, "confidence": confidence}
 
 
 # ----------------------------------------------------------------------
 # Orchestration LLM: query construction
 # ----------------------------------------------------------------------
+
+# Plural form to match the existing target_category convention already in
+# use ("bottoms", "outerwear", "accessories" in the system prompt's own
+# examples) -- garment_type itself stays singular (describes the ONE
+# uploaded item), target_category stays plural (describes the category
+# being searched FOR).
+COMPLEMENTARY_CATEGORY_FALLBACK = {
+    "top": "bottoms",
+    "bottom": "tops",
+    "dress": "outerwear",   # judgment call -- revisit once you have real usage
+    "outerwear": "tops",    # judgment call -- revisit once you have real usage
+    "accessory": "tops",    # judgment call -- revisit once you have real usage
+}
+
+
+def _fallback_target_category(garment_type, broaden: bool) -> str:
+    """Replaces the literal `None if broaden else "bottoms"` default."""
+    if broaden:
+        return None
+    return COMPLEMENTARY_CATEGORY_FALLBACK.get(garment_type, "bottoms")
+
 
 def build_complementary_query(attributes: dict, broaden: bool = False,
                               simulate_failure: bool = False) -> dict:
@@ -209,6 +474,8 @@ def build_complementary_query(attributes: dict, broaden: bool = False,
         "No reasoning, no explanation, no markdown, JSON only."
     )
     user_prompt = f"Item attributes: {json.dumps(attributes)}"
+    if attributes.get("garment_type"):
+        user_prompt += f"\nThis item's garment_type is: {attributes['garment_type']}."
     if broaden:
         user_prompt += (
             "\n\nThe first search came back with too few results. Broaden "
@@ -239,7 +506,8 @@ def build_complementary_query(attributes: dict, broaden: bool = False,
         raise ToolError(f"build_complementary_query: no JSON found in LLM response: {content!r}")
     query = json.loads(match.group(0))
 
-    query.setdefault("target_category", None if broaden else "bottoms")
+    garment_type = attributes.get("garment_type")
+    query.setdefault("target_category", _fallback_target_category(garment_type, broaden))
     query.setdefault("compatible_colors", [])
     query.setdefault("occasion", attributes.get("occasion", "casual"))
     query.setdefault("text_query", "")
