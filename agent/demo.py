@@ -1,11 +1,26 @@
 """
-Demo runner for the Digital Closet agent graph.
+Demo runner for the Digital Closet agent graph -- step 4 applied.
 
-Runs three scenarios so every documented branch actually executes, which is
-exactly what the handout's video demo should show:
-  1. Happy path: confident vision tag, enough results, present + save.
-  2. Low-confidence vision tag -> re-upload branch (no retrieval attempted).
-  3. Forced search-tool failure -> retry-once -> plain-language message.
+Runs seven scenarios so every documented branch actually executes:
+  1. Happy path: top-item photo, real vision call, present + save.
+  2. Bottoms-item photo: exercises the new garment_type fix end to end
+     (confidence not penalized for absent neck/sleeve, target_category
+     correctly comes back "tops" instead of the old hardcoded "bottoms").
+  3. Low-confidence vision tag -> re-upload branch.
+  4. Forced search-tool failure -> retry-once -> plain-language message.
+  5. Zero search results -> explicit message, not a blank card view.
+  6. Forced vision_extract total failure -> graceful stop, no crash.
+  7. Forced build_query total failure -> graceful stop, no crash.
+
+IMPORTANT: every scenario below now makes a REAL, BILLED API call to
+Fireworks/Nebius (vision_extract_attributes is no longer a stub) and, from
+search_brand_inventory onward, to Pinecone. Each scenario invokes the graph
+ONCE per real photo -- there is no retry-until-a-particular-confidence
+loop. The old version of this file had exactly that kind of loop in the
+happy-path and low-confidence scenarios, written for a random stub that no
+longer exists; against the real, deterministic vision call that loop would
+either do nothing or run forever making live API calls. See
+claude/step4_apply_diff_summary.md for the full explanation.
 
 Usage:
     python demo.py
@@ -23,7 +38,7 @@ def print_trace(state):
 
 def scenario_happy_path(app):
     print("=" * 60)
-    print("SCENARIO 1: happy path (confident tag, results found, save approved)")
+    print("SCENARIO 1: happy path (top item photo -> confident tag, save approved)")
     print("=" * 60)
 
     config = {"configurable": {"thread_id": "demo-happy-1"}}
@@ -32,24 +47,25 @@ def scenario_happy_path(app):
         "user_id": "kiran-demo-user",
     }
 
-    # Force a confident vision read for this scenario by monkeypatching is
-    # overkill for a demo script -- instead just retry the invoke until we
-    # land a confident draw, since vision_extract_attributes randomizes
-    # confidence to let this same script show both branches naturally.
     result = app.invoke(initial, config)
-    while result["vision_confidence"] < 0.65:
-        result = app.invoke(initial, config)
 
-    print(f"Vision confidence: {result['vision_confidence']}")
+    print(f"Vision confidence: {result.get('vision_confidence')}")
+    print(f"Extracted attributes: {result.get('attributes')}")
     print(f"Status message: {result.get('status_message')}")
+
+    if result.get("vision_confidence", 0) < 0.65:
+        print("NOTE: this photo scored below the 0.65 threshold for real -- "
+              "the graph correctly routed to the re-upload branch instead of "
+              "search. Not a bug; if you expected this photo to read "
+              "confidently, that's worth a look before recording the demo "
+              "video with it.")
+        print_trace(result)
+        return
 
     if result.get("ranked_recommendations"):
         print(f"Recommendations: {[r['name'] for r in result['ranked_recommendations']]}")
         print(f"Styling note: {result['styling_note']}")
 
-        # Graph paused before save_to_digital_closet (interrupt_before). This is
-        # the human-in-the-loop gate. Simulate the user clicking "save" on the
-        # first card, then resume the graph.
         print("\n[human-in-the-loop] User clicks 'Save' on the first recommendation...")
         app.update_state(config, {
             "user_wants_to_save": True,
@@ -63,9 +79,54 @@ def scenario_happy_path(app):
         print_trace(result)
 
 
+def scenario_bottoms_photo(app):
+    """
+    Step 4's garment_type fix, exercised end to end for the first time.
+    Requires test_images/closet_bottoms.jpg.
+    """
+    print("=" * 60)
+    print("SCENARIO 2: bottoms item photo -> garment_type fix check")
+    print("=" * 60)
+
+    config = {"configurable": {"thread_id": "demo-bottoms-1"}}
+    initial = {
+        "image_path": "test_images/closet_bottoms.jpg",
+        "user_id": "kiran-demo-user",
+    }
+    result = app.invoke(initial, config)
+
+    attrs = result.get("attributes", {})
+    confidence = result.get("vision_confidence")
+    garment_type = attrs.get("garment_type")
+
+    print(f"Vision confidence: {confidence}")
+    print(f"Extracted attributes: {attrs}")
+
+    if garment_type != "bottom":
+        print(f"NOTE: expected garment_type='bottom', got {garment_type!r} -- "
+              "check the photo or the model's read before trusting the rest "
+              "of this scenario's output.")
+    else:
+        print("garment_type correctly read as 'bottom'.")
+        if "neck_type" not in attrs and "sleeve_type" not in attrs:
+            print("Confidence correctly NOT penalized for absent neck_type/"
+                  f"sleeve_type on a bottoms item (confidence={confidence}, "
+                  "graded only against pattern/silhouette/primary_color + "
+                  "garment_type -- see FIELD_APPLICABILITY).")
+
+    print(f"Status message: {result.get('status_message')}")
+    if result.get("query"):
+        target_category = result["query"].get("target_category")
+        print(f"build_complementary_query target_category: {target_category!r} "
+              f"(expected 'tops', not the old hardcoded 'bottoms')")
+    if result.get("ranked_recommendations"):
+        print(f"Recommendations: {[r['name'] for r in result['ranked_recommendations']]}")
+    print_trace(result)
+
+
 def scenario_low_confidence(app):
     print("=" * 60)
-    print("SCENARIO 2: low-confidence vision tag -> ask user to re-upload")
+    print("SCENARIO 3: low-confidence vision tag -> ask user to re-upload")
     print("=" * 60)
 
     config = {"configurable": {"thread_id": "demo-lowconf-1"}}
@@ -74,19 +135,20 @@ def scenario_low_confidence(app):
         "user_id": "kiran-demo-user",
     }
     result = app.invoke(initial, config)
-    while result["vision_confidence"] >= 0.65:
-        # force the low-confidence branch for the demo
-        config = {"configurable": {"thread_id": f"demo-lowconf-{result['vision_confidence']}"}}
-        result = app.invoke(initial, config)
 
-    print(f"Vision confidence: {result['vision_confidence']}")
+    print(f"Vision confidence: {result.get('vision_confidence')}")
     print(f"Status message shown to user: {result.get('status_message')}")
+    if result.get("vision_confidence", 0) >= 0.65:
+        print("NOTE: this photo scored ABOVE 0.65 for real -- the low-"
+              "confidence branch did not fire. blurry_photo.jpg may need to "
+              "be a genuinely harder photo to read before this scenario "
+              "demonstrates anything.")
     print_trace(result)
 
 
 def scenario_search_failure(app):
     print("=" * 60)
-    print("SCENARIO 3: search_brand_inventory fails once, retries, then succeeds")
+    print("SCENARIO 4: search_brand_inventory fails once, retries, then succeeds")
     print("=" * 60)
 
     config = {"configurable": {"thread_id": "demo-searchfail-1"}}
@@ -96,14 +158,17 @@ def scenario_search_failure(app):
         "_force_search_failure_once": True,
     }
     result = app.invoke(initial, config)
-    while result["vision_confidence"] < 0.65:
-        result = app.invoke(initial, config)
+    if result.get("vision_confidence", 0) < 0.65:
+        print("Vision came back low-confidence for this photo on this run -- "
+              "search was never reached, so the retry-once path this "
+              "scenario is meant to exercise didn't fire. Re-run, or use a "
+              "photo confirmed to score above threshold.")
     print_trace(result)
 
 
 def scenario_zero_results(app):
     print("=" * 60)
-    print("SCENARIO 4: zero search results -> explicit message, not a blank card view")
+    print("SCENARIO 5: zero search results -> explicit message, not a blank card view")
     print("=" * 60)
 
     config = {"configurable": {"thread_id": "demo-zeroresults-1"}}
@@ -113,8 +178,6 @@ def scenario_zero_results(app):
         "_force_zero_results": True,
     }
     result = app.invoke(initial, config)
-    while result["vision_confidence"] < 0.65:
-        result = app.invoke(dict(initial), config)
 
     print(f"Ranked recommendations: {result.get('ranked_recommendations')}")
     print(f"Status message shown to user: {result.get('status_message')}")
@@ -123,7 +186,7 @@ def scenario_zero_results(app):
 
 def scenario_vision_total_failure(app):
     print("=" * 60)
-    print("SCENARIO 5: vision_extract fails on both attempts -> graceful stop, no crash")
+    print("SCENARIO 6: vision_extract fails on both attempts -> graceful stop, no crash")
     print("=" * 60)
     config = {"configurable": {"thread_id": "demo-visionfail-1"}}
     initial = {
@@ -138,7 +201,7 @@ def scenario_vision_total_failure(app):
 
 def scenario_build_query_total_failure(app):
     print("=" * 60)
-    print("SCENARIO 6: build_query fails on both attempts -> graceful stop, no crash")
+    print("SCENARIO 7: build_query fails on both attempts -> graceful stop, no crash")
     print("=" * 60)
     config = {"configurable": {"thread_id": "demo-buildqueryfail-1"}}
     initial = {
@@ -147,8 +210,6 @@ def scenario_build_query_total_failure(app):
         "_force_build_query_failure": True,
     }
     result = app.invoke(initial, config)
-    while result.get("vision_confidence") is not None and result["vision_confidence"] < 0.65:
-        result = app.invoke(dict(initial), config)
     print(f"Status message shown to user: {result.get('status_message')}")
     print_trace(result)
 
@@ -156,6 +217,7 @@ def scenario_build_query_total_failure(app):
 if __name__ == "__main__":
     app = build_graph()
     scenario_happy_path(app)
+    scenario_bottoms_photo(app)
     scenario_low_confidence(app)
     scenario_search_failure(app)
     scenario_zero_results(app)
