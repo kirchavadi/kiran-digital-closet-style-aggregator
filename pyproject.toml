@@ -3,5 +3,6 @@ name = "kiransdigitalcloset1"
 version = "0.1.0"
 requires-python = ">=3.10.9"
 dependencies = [
+    "mem0ai>=2.0.20",
     "requests>=2.34.2",
 ]
