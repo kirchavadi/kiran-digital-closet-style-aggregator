@@ -63,6 +63,7 @@ def _init_session_state():
         "upload_thread_id": None,
         "upload_result": None,
         "uploaded_file_sig": None,
+        "uploaded_image_path": None,
         "upload_saved_item_id": None,
         "pref_thread_id": None,
         "pref_result": None,
@@ -153,6 +154,7 @@ def page_upload_and_recommend():
                 result = app.invoke(initial, config)
 
             st.session_state["uploaded_file_sig"] = sig
+            st.session_state["uploaded_image_path"] = image_path
             st.session_state["upload_thread_id"] = thread_id
             st.session_state["upload_result"] = result
             st.session_state["upload_saved_item_id"] = None
@@ -163,9 +165,20 @@ def page_upload_and_recommend():
 
     st.divider()
 
+    if st.session_state.get("uploaded_image_path"):
+        img_col, _ = st.columns([1, 3])
+        with img_col:
+            st.image(
+                st.session_state["uploaded_image_path"],
+                caption="Your uploaded item",
+                width="stretch",
+            )
+
     confidence = result.get("vision_confidence")
     if confidence is not None:
         st.caption(f"Vision confidence: {confidence}")
+
+    st.subheader("Recommendations")
 
     if result.get("status_message") and not result.get("ranked_recommendations"):
         st.warning(result["status_message"])
