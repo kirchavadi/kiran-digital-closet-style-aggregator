@@ -539,11 +539,14 @@ CATEGORY_KEYWORDS = {
 def _category_matches_target(candidate_category: str, target_category: str,
                              candidate_name: str = "") -> bool:
     """
-    Checks candidate_category first, falling back to candidate_name when
-    category metadata is missing/unhelpful -- this catalog's category
-    field is known-inconsistent (a pair of pants was found filed under
-    category="Dresses"), while name is free text but almost always
-    present and reliably contains the garment word itself.
+    Checks candidate_name FIRST, falling back to candidate_category only
+    when name gives no signal. This order is deliberate: live testing
+    (Sept 13) found real catalog records where category confidently
+    states the WRONG macro-category (e.g. a maxi skirt filed under
+    category="Tops") -- checking category first let those records slip
+    through undetected. name is free text but is directly authored per
+    product and reliably contains the actual garment word, making it the
+    more trustworthy signal for this catalog.
 
     For each text source in turn: a match against the TARGET category's
     own keywords is a confident keep; a match against a DIFFERENT
@@ -558,7 +561,7 @@ def _category_matches_target(candidate_category: str, target_category: str,
     if not keywords:
         return True
 
-    for text in (candidate_category, candidate_name):
+    for text in (candidate_name, candidate_category):
         if not text:
             continue
         low = text.lower()
@@ -734,7 +737,7 @@ def _generate_styling_note(top_candidates: list, attributes: dict) -> str:
                 "max_tokens": 150,
                 "temperature": 0.5,
             },
-            timeout=15,
+            timeout=20,
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
