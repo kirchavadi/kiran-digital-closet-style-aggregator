@@ -150,8 +150,31 @@ def page_upload_and_recommend():
             config = {"configurable": {"thread_id": thread_id}}
             initial = {"image_path": image_path, "user_id": st.session_state["user_id"]}
 
-            with st.spinner("Reading the photo and finding pairings..."):
-                result = app.invoke(initial, config)
+            status_placeholder = st.empty()
+            with status_placeholder.container():
+                _, center_col, _ = st.columns([1, 2, 1])
+                with center_col:
+                    st.markdown(
+                        """
+                        <div style="
+                            text-align:center;
+                            padding:1.25rem 1rem;
+                            border-radius:12px;
+                            border:2px solid #FF8C00;
+                            background-color:rgba(255,140,0,0.15);
+                        ">
+                            <div style="font-size:1.4rem; font-weight:700;">
+                                🔎 Reading the photo and finding pairings...
+                            </div>
+                            <div style="font-size:0.95rem; margin-top:0.4rem; opacity:0.85;">
+                                This takes a few seconds -- please wait.
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            result = app.invoke(initial, config)
+            status_placeholder.empty()
 
             st.session_state["uploaded_file_sig"] = sig
             st.session_state["uploaded_image_path"] = image_path
