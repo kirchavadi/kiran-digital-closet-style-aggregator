@@ -516,6 +516,51 @@ def build_complementary_query(attributes: dict, broaden: bool = False,
     return query
 
 
+# Soft keyword match against whatever raw per-brand category string
+# Pinecone metadata actually holds -- deliberately NOT a strict equality
+# check. This project already learned that lesson once: occasion was
+# removed as a hard Pinecone filter for exactly this reason (raw per-brand
+# tag strings like "office outfits" won't reliably $eq-match a normalized
+# enum). Same risk applies to category, so this is a tolerant substring
+# match, not an exact one, and it's permissive on anything it can't
+# confidently judge, rather than restrictive.
+CATEGORY_KEYWORDS = {
+    "tops": ["top", "blouse", "shirt", "tee", "tank", "cami", "sweater",
+             "sweatshirt", "hoodie", "bodysuit"],
+    "bottoms": ["bottom", "pant", "trouser", "short", "jean", "skirt",
+                "skort", "legging"],
+    "dresses": ["dress", "gown", "jumpsuit", "romper"],
+    "outerwear": ["jacket", "coat", "blazer", "cardigan", "outerwear", "vest"],
+    "accessories": ["accessory", "accessories", "bag", "jewelry", "belt",
+                     "scarf", "hat"],
+}
+
+
+def _category_matches_target(candidate_category: str, target_category: str) -> bool:
+    """
+    Permissive by default -- only excludes a candidate when reasonably
+    confident it's the WRONG macro-category, never when just unsure.
+    Three cases nothing gets filtered:
+      - no target_category at all (broadened query -- graph.py's existing
+        MIN_RESULTS/broaden path is the safety valve for this filter being
+        too strict, not a new mechanism this file has to invent)
+      - target_category isn't one we have a keyword list for (an
+        LLM-invented category word we didn't anticipate -- don't guess)
+      - the candidate's own category metadata is missing/empty (same
+        graceful-fallback philosophy already used for has_image_vector --
+        don't punish incomplete metadata)
+    """
+    if not target_category:
+        return True
+    keywords = CATEGORY_KEYWORDS.get(target_category.lower())
+    if not keywords:
+        return True
+    if not candidate_category:
+        return True
+    low = candidate_category.lower()
+    return any(kw in low for kw in keywords)
+
+
 # ----------------------------------------------------------------------
 # search_brand_inventory (read tool -> dual Pinecone query)
 # ----------------------------------------------------------------------
@@ -574,6 +619,17 @@ def search_brand_inventory(query: dict, image_path: str = None,
             merged[mid] = _to_candidate(mid, _match_metadata(match), score)
 
     candidates = list(merged.values())
+
+    # Enforce target_category using metadata already being returned per
+    # candidate, instead of relying on text_query wording alone -- live
+    # testing (Sept 13) showed wording alone isn't reliable enough on its
+    # own. Skipped entirely when target_category is unset (the
+    # broaden-query path), which already exists as this filter's safety
+    # valve if it's ever too strict.
+    target_category = query.get("target_category")
+    if target_category:
+        candidates = [c for c in candidates if _category_matches_target(c["category"], target_category)]
+
     candidates.sort(
         key=lambda c: c["score"] - (TEXT_ONLY_RANK_PENALTY if c["display_mode"] == "text_only" else 0.0),
         reverse=True,
