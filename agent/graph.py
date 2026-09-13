@@ -170,7 +170,10 @@ def node_get_user_preferences(state: ClosetAgentState) -> ClosetAgentState:
 
 
 def node_rank_and_style(state: ClosetAgentState) -> ClosetAgentState:
-    result, err = call_with_retry(rank_and_style, state["search_results"], state["user_preferences"])
+    result, err = call_with_retry(
+        rank_and_style, state["search_results"], state["user_preferences"],
+        state.get("attributes", {}),
+    )
     if err:
         state["status_message"] = "Couldn't rank the results, but here's what we found."
         state["ranked_recommendations"] = state.get("search_results", [])

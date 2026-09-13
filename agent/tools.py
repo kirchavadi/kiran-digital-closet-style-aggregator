@@ -536,29 +536,41 @@ CATEGORY_KEYWORDS = {
 }
 
 
-def _category_matches_target(candidate_category: str, target_category: str) -> bool:
+def _category_matches_target(candidate_category: str, target_category: str,
+                             candidate_name: str = "") -> bool:
     """
-    Permissive by default -- only excludes a candidate when reasonably
-    confident it's the WRONG macro-category, never when just unsure.
-    Three cases nothing gets filtered:
-      - no target_category at all (broadened query -- graph.py's existing
-        MIN_RESULTS/broaden path is the safety valve for this filter being
-        too strict, not a new mechanism this file has to invent)
-      - target_category isn't one we have a keyword list for (an
-        LLM-invented category word we didn't anticipate -- don't guess)
-      - the candidate's own category metadata is missing/empty (same
-        graceful-fallback philosophy already used for has_image_vector --
-        don't punish incomplete metadata)
+    Checks candidate_category first, falling back to candidate_name when
+    category metadata is missing/unhelpful -- this catalog's category
+    field is known-inconsistent (a pair of pants was found filed under
+    category="Dresses"), while name is free text but almost always
+    present and reliably contains the garment word itself.
+
+    For each text source in turn: a match against the TARGET category's
+    own keywords is a confident keep; a match against a DIFFERENT
+    category's keywords is a confident exclude; no match at all moves on
+    to the next text source. If neither gives any signal, permissive
+    default still applies -- don't punish incomplete data, don't guess.
     """
     if not target_category:
         return True
-    keywords = CATEGORY_KEYWORDS.get(target_category.lower())
+    target_category = target_category.lower()
+    keywords = CATEGORY_KEYWORDS.get(target_category)
     if not keywords:
         return True
-    if not candidate_category:
-        return True
-    low = candidate_category.lower()
-    return any(kw in low for kw in keywords)
+
+    for text in (candidate_category, candidate_name):
+        if not text:
+            continue
+        low = text.lower()
+        if any(kw in low for kw in keywords):
+            return True
+        for other_cat, other_kws in CATEGORY_KEYWORDS.items():
+            if other_cat == target_category:
+                continue
+            if any(kw in low for kw in other_kws):
+                return False
+
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -628,7 +640,10 @@ def search_brand_inventory(query: dict, image_path: str = None,
     # valve if it's ever too strict.
     target_category = query.get("target_category")
     if target_category:
-        candidates = [c for c in candidates if _category_matches_target(c["category"], target_category)]
+        candidates = [
+            c for c in candidates
+            if _category_matches_target(c["category"], target_category, c["name"])
+        ]
 
     candidates.sort(
         key=lambda c: c["score"] - (TEXT_ONLY_RANK_PENALTY if c["display_mode"] == "text_only" else 0.0),
@@ -661,17 +676,86 @@ def get_user_preferences(user_id: str) -> dict:
 # Orchestration LLM: ranking + styling copy
 # ----------------------------------------------------------------------
 
-def rank_and_style(candidates: list, preferences: dict) -> tuple[list, str]:
+def rank_and_style(candidates: list, preferences: dict,
+                   attributes: dict = None) -> tuple[list, str]:
     """
-    STUB. REAL IMPLEMENTATION: call Llama-3.3-70B with candidates +
-    preferences, have it drop/deprioritize disliked colors/brands and
-    over-budget items, then return a ranked list plus a short styling note.
+    Filters out over-budget candidates, deprioritizes (never drops)
+    disliked colors, and lightly boosts preferred brands -- then asks
+    Llama-3.3-70B (Nebius) to write a short styling note grounded in the
+    actual owned-item attributes and top-ranked candidates. Never raises:
+    styling-copy failures fall back to deterministic copy from real names.
     """
-    ranked = [c for c in candidates if c["price"] <= preferences.get("budget_max", 9999)]
-    ranked.sort(key=lambda c: c["id"] not in [], reverse=False)  # placeholder, real: LLM-ranked
-    note = ("These pair well with a fitted black sleeveless top -- the wide-leg "
-            "pants add contrast, the skort keeps it casual.")
+    attributes = attributes or {}
+    budget_max = preferences.get("budget_max", 9999)
+    disliked_colors = [c.lower() for c in preferences.get("disliked_colors", [])]
+    preferred_brands = [b.lower() for b in preferences.get("preferred_brands", [])]
+
+    affordable = [c for c in candidates if c.get("price", 0) <= budget_max]
+
+    def _rank_key(candidate):
+        name_low = (candidate.get("name") or "").lower()
+        penalty = 0.15 if any(dc in name_low for dc in disliked_colors) else 0.0
+        bonus = 0.05 if (candidate.get("brand") or "").lower() in preferred_brands else 0.0
+        return candidate.get("score", 0.0) - penalty + bonus
+
+    ranked = sorted(affordable, key=_rank_key, reverse=True)
+    note = _generate_styling_note(ranked[:3], attributes)
     return ranked, note
+
+
+def _generate_styling_note(top_candidates: list, attributes: dict) -> str:
+    api_key = os.environ.get("NEBIUS_API_KEY")
+    if not api_key or not top_candidates:
+        return _fallback_styling_note(top_candidates, attributes)
+
+    system_prompt = (
+        "You are a fashion stylist assistant. Given the attributes of an "
+        "item a user already owns and a short list of complementary "
+        "products actually being recommended to pair with it, write ONE "
+        "short (1-2 sentence) styling note grounded ONLY in the items "
+        "given -- name the actual pieces by name, not a generic template. "
+        "No JSON, no markdown, plain text only."
+    )
+    user_prompt = (
+        f"Owned item attributes: {json.dumps(attributes)}\n"
+        f"Top recommended pieces: "
+        f"{json.dumps([{'name': c.get('name', ''), 'brand': c.get('brand', '')} for c in top_candidates])}"
+    )
+    try:
+        resp = requests.post(
+            "https://api.studio.nebius.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "meta-llama/Llama-3.3-70B-Instruct",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": 150,
+                "temperature": 0.5,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        return content or _fallback_styling_note(top_candidates, attributes)
+    except Exception:
+        return _fallback_styling_note(top_candidates, attributes)
+
+
+def _fallback_styling_note(top_candidates: list, attributes: dict) -> str:
+    names = [c.get("name", "").strip() for c in top_candidates if c.get("name")]
+    if not names:
+        return "Here are a few pieces that could work well with this item."
+    if len(names) > 2:
+        pieces = ", ".join(names[:-1]) + f", and {names[-1]}"
+    elif len(names) == 2:
+        pieces = f"{names[0]} and {names[1]}"
+    else:
+        pieces = names[0]
+    color = attributes.get("primary_color", "")
+    color_phrase = f"your {color} item" if color else "this item"
+    return f"{pieces} could pair well with {color_phrase}."
 
 
 # ----------------------------------------------------------------------
