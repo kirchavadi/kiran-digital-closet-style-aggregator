@@ -26,7 +26,10 @@ Usage:
     python demo.py
 """
 
+import time
+
 from graph import build_graph
+from tools import get_user_preferences
 
 
 def print_trace(state):
@@ -214,6 +217,66 @@ def scenario_build_query_total_failure(app):
     print_trace(result)
 
 
+def scenario_remember_preference(app):
+    """
+    Exercises the full Step 5 loop: state a preference in chat -> approval
+    gate -> Mem0 write -> confirm it's reflected in a LATER, real graph
+    invocation (not just a direct function call) via node_get_user_preferences.
+    """
+    print("=" * 60)
+    print("SCENARIO 8: state a dislike -> approve remembering it -> confirm it's reflected later")
+    print("=" * 60)
+
+    user_id = "kiran-demo-user"
+    stated_preference = "I dont like the color orange"
+
+    config = {"configurable": {"thread_id": "demo-preference-1"}}
+    result = app.invoke({"user_message": stated_preference, "user_id": user_id}, config)
+    print(f"Confirmation message shown to user: {result.get('status_message')}")
+
+    print("\n[human-in-the-loop] User confirms: yes, remember this preference...")
+    app.update_state(config, {
+        "user_wants_to_remember_preference": True,
+        "approved_preference_text": stated_preference,
+    })
+    final = app.invoke(None, config)  # resume from the interrupt, executes remember_preference
+    print(f"Preference saved: {final.get('preference_saved')}")
+    print(f"Status message: {final.get('status_message')}")
+    print_trace(final)
+
+    print("\nWaiting for Mem0's write to become readable (eventually consistent)...")
+    max_attempts = 6
+    delay_seconds = 2
+    prefs = None
+    for attempt in range(1, max_attempts + 1):
+        prefs = get_user_preferences(user_id)
+        if "orange" in prefs.get("disliked_colors", []):
+            print(f"  Attempt {attempt}: 'orange' now visible in disliked_colors.")
+            break
+        print(f"  Attempt {attempt}: not visible yet, waiting {delay_seconds}s...")
+        time.sleep(delay_seconds)
+    else:
+        print(f"  NOTE: after {max_attempts} attempts (~{max_attempts * delay_seconds}s), "
+              f"'orange' still not visible ({prefs}). Likely Mem0 latency on this "
+              "particular run, not a code bug -- rerun this scenario alone to check, "
+              "or bump max_attempts/delay_seconds.")
+
+    print("\n[later in the same session] User uploads a photo and asks for recommendations...")
+    config2 = {"configurable": {"thread_id": "demo-preference-1-followup"}}
+    followup = app.invoke(
+        {"image_path": "test_images/closet_top.jpg", "user_id": user_id}, config2,
+    )
+    reflected_prefs = followup.get("user_preferences", {})
+    print(f"user_preferences read by the graph on this later run: {reflected_prefs}")
+    if "orange" in reflected_prefs.get("disliked_colors", []):
+        print("CONFIRMED: the stated dislike is reflected in a later, independent "
+              "graph invocation -- the demo goal is satisfied.")
+    else:
+        print("NOTE: 'orange' not present in this later invocation's user_preferences -- "
+              "check Mem0 timing or the thread_id/user_id wiring before recording.")
+    print_trace(followup)
+
+
 if __name__ == "__main__":
     app = build_graph()
     scenario_happy_path(app)
@@ -223,3 +286,4 @@ if __name__ == "__main__":
     scenario_zero_results(app)
     scenario_vision_total_failure(app)
     scenario_build_query_total_failure(app)
+    scenario_remember_preference(app)
