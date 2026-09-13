@@ -25,6 +25,7 @@ import json
 import mimetypes
 import os
 import re
+from datetime import datetime, timezone
 
 import requests
 from PIL import Image
@@ -935,11 +936,59 @@ def _fallback_styling_note(top_candidates: list, attributes: dict) -> str:
 # never here)
 # ----------------------------------------------------------------------
 
-def save_to_digital_closet(user_id: str, item_id: str) -> bool:
+_CLOSET_DIR = os.path.join(os.path.dirname(__file__), "data", "closets")
+
+
+def _closet_file_path(user_id: str) -> str:
+    safe_user_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", user_id).strip("._")
+    if not safe_user_id:
+        raise ToolError("user_id is required to save closet items")
+    return os.path.join(_CLOSET_DIR, f"{safe_user_id}.json")
+
+
+def get_saved_closet_items(user_id: str) -> list:
+    path = _closet_file_path(user_id)
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    return data.get("items", [])
+
+
+def save_to_digital_closet(user_id: str, item: dict) -> bool:
     """
-    STUB. REAL IMPLEMENTATION: INSERT into PostgreSQL via the MCP server,
-    the user's saved closet items table. This function assumes approval has
-    ALREADY happened -- graph.py must never call this without having passed
-    through the interrupt_before gate.
+    Persist the approved recommendation into a tiny local JSON closet store.
+
+    This function assumes approval has ALREADY happened -- graph.py must
+    never call this without having passed through the interrupt_before gate.
     """
+    if not isinstance(item, dict):
+        raise ToolError("save_to_digital_closet expected a full item dict")
+    item_id = item.get("id")
+    if not item_id:
+        raise ToolError("save_to_digital_closet item is missing id")
+
+    os.makedirs(_CLOSET_DIR, exist_ok=True)
+    path = _closet_file_path(user_id)
+    items = get_saved_closet_items(user_id)
+
+    saved_item = dict(item)
+    saved_item["saved_at"] = datetime.now(timezone.utc).isoformat()
+
+    replaced = False
+    for i, existing in enumerate(items):
+        if existing.get("id") == item_id:
+            items[i] = saved_item
+            replaced = True
+            break
+    if not replaced:
+        items.append(saved_item)
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, path)
     return True

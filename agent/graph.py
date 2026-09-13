@@ -252,7 +252,17 @@ def node_save_to_digital_closet(state: ClosetAgentState) -> ClosetAgentState:
     # actually succeeded server-side but the response was lost. Catch once,
     # report, let the human decide whether to try again.
     item_id = state.get("approved_item_id")
-    ok, err = call_with_retry(save_to_digital_closet, state["user_id"], item_id, max_retries=0)
+    item = next(
+        (r for r in state.get("ranked_recommendations", []) if r.get("id") == item_id),
+        None,
+    )
+    if item is None:
+        state["saved"] = False
+        state["status_message"] = "The selected item could not be saved. Please try again."
+        _log(state, f"save_to_digital_closet FAILED: approved item {item_id!r} not found")
+        return state
+
+    ok, err = call_with_retry(save_to_digital_closet, state["user_id"], item, max_retries=0)
     if err:
         state["saved"] = False
         state["status_message"] = "The save didn't go through. Please try saving again."
