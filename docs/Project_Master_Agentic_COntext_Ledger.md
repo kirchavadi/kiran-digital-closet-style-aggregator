@@ -40,8 +40,8 @@ vector is documented rather than silently absent from the image index.
 
 ### 3. Core Architecture & Rules
   ### Design Patterns: Two-part architecture:
-- Offline ingestion pipeline (unchanged): scrape → embed (bge-m3 text / CLIP image, parallel branches) → index (two Pinecone namespaces).
-- Runtime pipeline, now agentic rather than fixed-sequence: photo upload → vision-tag (Qwen2.5-VL) → dual Pinecone retrieval → orchestration (Llama-3.3-70B) → display, wrapped in a LangGraph state machine that makes real decisions at each step rather than always proceeding linearly (e.g., re-prompt the user on a low-confidence vision tag; broaden the query if Pinecone returns too few matches).
+- Offline ingestion pipeline: scrape → backfill/clean attributes → embed (Qwen3-Embedding-8B text / local CLIP image, parallel branches) → index (two Pinecone indexes, one namespace each).
+- Runtime pipeline, agentic rather than fixed-sequence: photo upload → vision-tag (GLM-5.3-Flash) → dual Pinecone retrieval → orchestration (Llama-3.3-70B, builds a complementary-item query, not a similarity query) → display, wrapped in a LangGraph state machine that makes real decisions at each step (e.g., re-prompt the user on a low-confidence vision tag; broaden the query if Pinecone returns too few matches).
 - Agent/tool-calling layer: search_brand_inventory (read, real dual-Pinecone), get_user_preferences (read, real hosted Mem0), remember_user_preference (write, real hosted Mem0, gated behind human-approval interrupt — added Step 5, Sept 13 2026), save_to_digital_closet (write, still a deliberate stub) — plus vision_extract_attributes (real Fireworks/Nebius GLM-5.3-Flash), build_complementary_query (real Nebius Llama-3.3-70B), rank_and_style (real Nebius Llama-3.3-70B styling note with deterministic fallback) as graph nodes. All 7 tool calls route through a shared call_with_retry() helper (remember_user_preference and save_to_digital_closet deliberately do not auto-retry, to avoid a double-write).
 
   ### Hard Constraints:
@@ -125,8 +125,6 @@ vector is documented rather than silently absent from the image index.
 - Sept 13, 2026: Built and wired Scenario 8 into demo.py — state a dislike in chat -> human-approval gate -> remember_user_preference write -> confirmed reflected in a LATER, independent graph invocation (separate thread_id, via the real get_user_preferences node, not a direct function call) — the actual demo goal named in the Sept 12, 2026 Mem0 decision above. Verified live against the real hosted Mem0 Platform: preference saved, "orange" became visible in disliked_colors after 3 poll attempts (~6s, expected Mem0 eventual-consistency delay, not a bug), and the later invocation correctly read {"disliked_colors": ["orange"], "preferred_brands": [], "budget_max": 9999.0}. This closes Step 5 completely, including its originally-stated demo goal, not just the read/write tools in isolation.
 - Sept 13, 2026: Created a GitHub remote (previously none existed at all — confirmed via `git remote -v` returning nothing) and pushed branch step5-mem0-preference-memory upstream to git@github.com:kirchavadi/kiran-digital-closet-style-aggregator.git. GitHub warned about a few tracked JSON files near/over 50MB on push (informational only, didn't block it) — flagged for a possible later `.gitignore`/Git LFS cleanup, not urgent before the deadline.
 
-
-### 6. Agent Framework (new section — Week 3 requirement)
 
 ### 6. Agent Framework (new section — Week 3 requirement)
 
