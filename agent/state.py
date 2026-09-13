@@ -35,10 +35,16 @@ class ClosetAgentState(TypedDict, total=False):
     ranked_recommendations: list
     styling_note: str
 
-    # --- human-in-the-loop / write path ---
+    # --- human-in-the-loop / save write path ---
     user_wants_to_save: bool    # set externally when the user clicks "save" on a card
     approved_item_id: Optional[str]
     saved: bool
+
+    # --- preference statement / write path ---
+    user_message: Optional[str]                    # raw chat text, e.g. "I don't like orange"
+    user_wants_to_remember_preference: bool         # set externally on human approval
+    approved_preference_text: Optional[str]         # text the human actually approved
+    preference_saved: bool
 
     # --- error handling / retries ---
     retry_counts: dict          # per-tool retry counter, e.g. {"search_brand_inventory": 1}
@@ -55,3 +61,4 @@ class ClosetAgentState(TypedDict, total=False):
     _force_zero_results: bool
     _force_vision_failure: bool
     _force_build_query_failure: bool
+    _force_preference_failure: bool

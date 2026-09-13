@@ -11,6 +11,8 @@ graph.py -- these functions are the seam.
 Tool inventory (per Section 3 / Section 6 of the ledger):
   - search_brand_inventory   (read, autonomous)
   - get_user_preferences     (read, autonomous)
+  - remember_user_preference (write, requires human approval -- gated in graph.py,
+                               not here)
   - save_to_digital_closet   (write, requires human approval -- gated in graph.py,
                                not here)
   - vision_extract_attributes (not an MCP tool per se, but the vision model call)
@@ -37,6 +39,7 @@ class ToolError(Exception):
 
 _PINECONE_CLIENT = None
 _CLIP_MODEL = None
+_MEM0_CLIENT = None
 
 TEXT_INDEX_NAME = "bge-m3-index"
 IMAGE_INDEX_NAME = "clip-index"
@@ -62,6 +65,71 @@ def _get_clip_model() -> SentenceTransformer:
     if _CLIP_MODEL is None:
         _CLIP_MODEL = SentenceTransformer("clip-ViT-B-32")
     return _CLIP_MODEL
+
+
+class _LocalFakeMem0Store:
+    """
+    Temporary, free, in-process stand-in for Mem0 -- used automatically
+    when MEM0_API_KEY isn't set yet. Mimics only the two calls this
+    project actually uses (add/get_all), matching their real shapes
+    closely enough that _extract_preferences_from_memories doesn't need
+    to know which one it's talking to.
+    """
+    def __init__(self):
+        self._by_user = {}
+
+    def add(self, messages, user_id):
+        text = messages[0]["content"]
+        self._by_user.setdefault(user_id, []).append(text)
+        return {"results": [{"memory": text}]}
+
+    def get_all(self, user_id):
+        return [{"memory": t} for t in self._by_user.get(user_id, [])]
+
+
+_LOCAL_FAKE_MEM0 = _LocalFakeMem0Store()
+
+
+def _get_mem0_client():
+    """
+    Hosted Mem0 Platform client when MEM0_API_KEY is set; local in-memory
+    fake otherwise, so graph wiring can be developed without waiting on
+    hosted credits. The fake is not persistent across process restarts.
+    """
+    global _MEM0_CLIENT
+    if _MEM0_CLIENT is None:
+        api_key = os.environ.get("MEM0_API_KEY")
+        if not api_key:
+            print("MEM0_API_KEY not set -- using a local in-memory store "
+                  "for now (preferences won't persist across process "
+                  "restarts). Set MEM0_API_KEY once your Mem0 credits are "
+                  "active to switch to the real hosted store automatically.")
+            _MEM0_CLIENT = _LOCAL_FAKE_MEM0
+        else:
+            from mem0 import MemoryClient
+            _MEM0_CLIENT = MemoryClient(api_key=api_key)
+    return _MEM0_CLIENT
+
+
+def remember_user_preference(user_id: str, preference_text: str,
+                             simulate_failure: bool = False) -> dict:
+    """
+    New WRITE tool -- saves a stated preference into Mem0 so a later
+    get_user_preferences call can retrieve it. Mem0 does its own fact
+    extraction from raw text in hosted mode; the local fake stores the
+    same raw text for graph-wiring demos.
+
+    graph.py must only call this from the remember_preference node, which
+    sits behind the same interrupt_before gate save_to_digital_closet
+    uses. This function assumes approval has already happened.
+    """
+    if simulate_failure:
+        raise ToolError("Mem0 preference write failed")
+    client = _get_mem0_client()
+    return client.add(
+        messages=[{"role": "user", "content": preference_text}],
+        user_id=user_id,
+    )
 
 
 def _embed_text_bge_m3(text: str) -> list:
@@ -663,16 +731,103 @@ def search_brand_inventory(query: dict, image_path: str = None,
 # get_user_preferences (read tool -> Mem0)
 # ----------------------------------------------------------------------
 
+# Keeps the exact stub schema rank_and_style already depends on
+# (preferences.get("budget_max", 9999)) so its caller never has to change.
+# A fresh user with nothing in Mem0 yet gets these defaults -- unfiltered
+# search, not a broken/missing budget_max.
+DEFAULT_PREFERENCES = {
+    "disliked_colors": [],
+    "preferred_brands": [],
+    "budget_max": 9999.0,
+}
+
+# Heuristic keyword scan, not an enum -- primary_color is deliberately
+# free text project-wide, so this is intentionally a scan list for
+# catching common cases in a stated preference, not a validator.
+COMMON_COLOR_WORDS = [
+    "black", "white", "red", "blue", "green", "yellow", "orange", "purple",
+    "pink", "brown", "grey", "gray", "beige", "navy", "cream", "tan",
+    "maroon", "olive", "teal", "gold", "silver", "ivory", "khaki",
+    "burgundy", "lavender", "mint", "coral", "mustard", "rust",
+]
+
+NEGATION_PHRASES = [
+    "don't like", "dont like", "doesn't like", "dislike", "hate",
+    "avoid", "not a fan of", "no more", "never wants", "doesn't want",
+]
+
+# Maps a human-readable brand mention to the exact domain string
+# search_brand_inventory's catalog already uses.
+BRAND_NAME_TO_DOMAIN = {
+    "saboskirt": "saboskirt.com",
+    "petal and pup": "petalandpup.com",
+    "petalandpup": "petalandpup.com",
+    "meshki": "meshki.us",
+    "bohme": "bohme.com",
+    "natural life": "naturallife.com",
+    "naturallife": "naturallife.com",
+    "oh polly": "ohpolly.com",
+    "ohpolly": "ohpolly.com",
+    "red dress": "reddress.com",
+    "reddress": "reddress.com",
+}
+
+_BUDGET_TRIGGER_WORDS = ("budget", "under $", "under$", " max", "at most", "no more than")
+_BUDGET_NUMBER_PATTERN = re.compile(r"\$?\s?(\d{2,4}(?:\.\d{1,2})?)")
+
+
+def _memory_text(memory: dict) -> str:
+    """Mem0 may return the fact under 'memory' or 'text' by SDK version."""
+    return memory.get("memory") or memory.get("text") or ""
+
+
+def _extract_preferences_from_memories(memory_texts: list) -> dict:
+    """
+    Translation layer: Mem0 stores/returns free-text facts, but
+    rank_and_style reads a fixed {disliked_colors, preferred_brands,
+    budget_max} shape. Keyword scan, not an LLM call.
+    """
+    disliked_colors = set()
+    preferred_brands = set()
+    budget_candidates = []
+
+    for text in memory_texts:
+        low = text.lower()
+
+        is_negative = any(neg in low for neg in NEGATION_PHRASES)
+        if is_negative:
+            for color in COMMON_COLOR_WORDS:
+                if color in low:
+                    disliked_colors.add(color)
+
+        for brand_name, domain in BRAND_NAME_TO_DOMAIN.items():
+            if brand_name in low:
+                preferred_brands.add(domain)
+
+        if any(trigger in low for trigger in _BUDGET_TRIGGER_WORDS):
+            match = _BUDGET_NUMBER_PATTERN.search(low)
+            if match:
+                budget_candidates.append(float(match.group(1)))
+
+    return {
+        "disliked_colors": sorted(disliked_colors) if disliked_colors
+        else DEFAULT_PREFERENCES["disliked_colors"],
+        "preferred_brands": sorted(preferred_brands) if preferred_brands
+        else DEFAULT_PREFERENCES["preferred_brands"],
+        "budget_max": min(budget_candidates) if budget_candidates
+        else DEFAULT_PREFERENCES["budget_max"],
+    }
+
+
 def get_user_preferences(user_id: str) -> dict:
     """
-    STUB. REAL IMPLEMENTATION: fetch the Mem0 user profile (disliked colors/
-    brands, past saved closet items, style preferences) for `user_id`.
+    Same return shape as the old stub, now backed by Mem0 or the local
+    fake. A fresh user with zero stated preferences gets defaults.
     """
-    return {
-        "disliked_colors": ["orange"],
-        "preferred_brands": ["reddress.com", "bohme.com"],
-        "budget_max": 150.0,
-    }
+    client = _get_mem0_client()
+    memories = client.get_all(user_id=user_id) or []
+    memory_texts = [_memory_text(m) for m in memories]
+    return _extract_preferences_from_memories(memory_texts)
 
 
 # ----------------------------------------------------------------------

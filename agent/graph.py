@@ -33,6 +33,7 @@ from tools import (
     build_complementary_query,
     get_user_preferences,
     rank_and_style,
+    remember_user_preference,
     save_to_digital_closet,
     search_brand_inventory,
     vision_extract_attributes,
@@ -78,6 +79,41 @@ def call_with_retry(fn, *args, max_retries: int = 1, on_retry=None, **kwargs):
 # ----------------------------------------------------------------------
 # Nodes
 # ----------------------------------------------------------------------
+
+def node_intake(state: ClosetAgentState) -> ClosetAgentState:
+    # Trivial pass-through -- exists only so the graph has a real node to
+    # route from before deciding which flow this invocation is.
+    return state
+
+
+def node_confirm_preference(state: ClosetAgentState) -> ClosetAgentState:
+    state["status_message"] = (
+        f'I heard: "{state["user_message"]}". Should I remember this preference?'
+    )
+    _log(state, f"confirm_preference: awaiting approval for '{state['user_message']}'")
+    return state
+
+
+def node_remember_preference(state: ClosetAgentState) -> ClosetAgentState:
+    # Reached only via the interrupt_before gate -- a human has already
+    # approved by the time this runs, same contract node_save_to_digital_closet
+    # already documents for its own write.
+    text = state.get("approved_preference_text") or state.get("user_message")
+    result, err = call_with_retry(
+        remember_user_preference, state["user_id"], text,
+        simulate_failure=state.get("_force_preference_failure", False),
+        max_retries=0,
+    )
+    if err:
+        state["preference_saved"] = False
+        state["status_message"] = "Couldn't save that preference. Please try again."
+        _log(state, f"remember_preference FAILED: text={text!r} error={err}")
+        return state
+    state["preference_saved"] = True
+    state["status_message"] = "Got it -- I'll remember that."
+    _log(state, f"remember_preference: text={text!r} saved")
+    return state
+
 
 def node_vision_extract(state: ClosetAgentState) -> ClosetAgentState:
     result, err = call_with_retry(
@@ -231,6 +267,18 @@ def node_save_to_digital_closet(state: ClosetAgentState) -> ClosetAgentState:
 # Conditional edge functions
 # ----------------------------------------------------------------------
 
+def route_intake(state: ClosetAgentState) -> str:
+    if state.get("user_message"):
+        return "confirm_preference"
+    return "vision_extract"
+
+
+def route_after_confirm_preference(state: ClosetAgentState) -> str:
+    if state.get("user_wants_to_remember_preference"):
+        return "remember_preference"
+    return END
+
+
 def route_after_vision(state: ClosetAgentState) -> str:
     if state["vision_confidence"] < CONFIDENCE_THRESHOLD:
         return "ask_reupload"
@@ -276,6 +324,9 @@ def route_after_save_request(state: ClosetAgentState) -> str:
 def build_graph():
     graph = StateGraph(ClosetAgentState)
 
+    graph.add_node("intake", node_intake)
+    graph.add_node("confirm_preference", node_confirm_preference)
+    graph.add_node("remember_preference", node_remember_preference)
     graph.add_node("vision_extract", node_vision_extract)
     graph.add_node("ask_reupload", node_ask_reupload)
     graph.add_node("build_query", node_build_query)
@@ -286,7 +337,18 @@ def build_graph():
     graph.add_node("present_cards", node_present_cards)
     graph.add_node("save_to_digital_closet", node_save_to_digital_closet)
 
-    graph.set_entry_point("vision_extract")
+    graph.set_entry_point("intake")
+
+    graph.add_conditional_edges(
+        "intake", route_intake,
+        {"confirm_preference": "confirm_preference", "vision_extract": "vision_extract"},
+    )
+
+    graph.add_conditional_edges(
+        "confirm_preference", route_after_confirm_preference,
+        {"remember_preference": "remember_preference", END: END},
+    )
+    graph.add_edge("remember_preference", END)
 
     graph.add_conditional_edges(
         "vision_extract", route_after_vision_extract,
@@ -320,12 +382,12 @@ def build_graph():
 
     checkpointer = MemorySaver()
 
-    # This is the human-in-the-loop enforcement point: the graph will not
-    # execute save_to_digital_closet in the same run that reaches
-    # present_cards. A human approval (setting user_wants_to_save +
-    # approved_item_id, then resuming with the same thread_id) is required
-    # to cross this line. This directly implements the ledger's hard
-    # constraint: "save_to_digital_closet must prompt for user confirmation
-    # before executing."
-    compiled = graph.compile(checkpointer=checkpointer, interrupt_before=["save_to_digital_closet"])
+    # Two gated write nodes now, same enforcement mechanism doing both
+    # jobs: the graph will not execute save_to_digital_closet OR
+    # remember_preference without an external approval (update_state +
+    # resume with the same thread_id) crossing this line first.
+    compiled = graph.compile(
+        checkpointer=checkpointer,
+        interrupt_before=["save_to_digital_closet", "remember_preference"],
+    )
     return compiled
