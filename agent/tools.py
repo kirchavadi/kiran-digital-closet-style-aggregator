@@ -83,7 +83,9 @@ class _LocalFakeMem0Store:
         self._by_user.setdefault(user_id, []).append(text)
         return {"results": [{"memory": text}]}
 
-    def get_all(self, user_id):
+    def get_all(self, user_id=None, filters=None):
+        if filters:
+            user_id = filters.get("user_id")
         return [{"memory": t} for t in self._by_user.get(user_id, [])]
 
 
@@ -753,7 +755,8 @@ COMMON_COLOR_WORDS = [
 
 NEGATION_PHRASES = [
     "don't like", "dont like", "doesn't like", "dislike", "hate",
-    "avoid", "not a fan of", "no more", "never wants", "doesn't want",
+    "do not like", "does not like", "avoid", "not a fan of", "no more",
+    "never wants", "doesn't want", "does not want",
 ]
 
 # Maps a human-readable brand mention to the exact domain string
@@ -779,6 +782,17 @@ _BUDGET_NUMBER_PATTERN = re.compile(r"\$?\s?(\d{2,4}(?:\.\d{1,2})?)")
 def _memory_text(memory: dict) -> str:
     """Mem0 may return the fact under 'memory' or 'text' by SDK version."""
     return memory.get("memory") or memory.get("text") or ""
+
+
+def _get_all_memories(client, user_id: str) -> list:
+    """Normalize hosted Mem0 and local fake get_all response shapes."""
+    try:
+        memories = client.get_all(filters={"user_id": user_id}) or []
+    except (TypeError, ValueError):
+        memories = client.get_all(user_id=user_id) or []
+    if isinstance(memories, dict):
+        return memories.get("results", [])
+    return memories
 
 
 def _extract_preferences_from_memories(memory_texts: list) -> dict:
@@ -825,7 +839,7 @@ def get_user_preferences(user_id: str) -> dict:
     fake. A fresh user with zero stated preferences gets defaults.
     """
     client = _get_mem0_client()
-    memories = client.get_all(user_id=user_id) or []
+    memories = _get_all_memories(client, user_id)
     memory_texts = [_memory_text(m) for m in memories]
     return _extract_preferences_from_memories(memory_texts)
 
