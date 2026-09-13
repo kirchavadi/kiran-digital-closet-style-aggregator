@@ -98,12 +98,20 @@ def node_vision_extract(state: ClosetAgentState) -> ClosetAgentState:
 
 
 def node_ask_reupload(state: ClosetAgentState) -> ClosetAgentState:
-    state["status_message"] = (
-        "I couldn't confidently read the details of that photo "
-        f"(confidence {state['vision_confidence']}). Could you try a clearer, "
-        "well-lit photo of the item?"
-    )
-    _log(state, "branch: low confidence -> asked user to re-upload")
+    attributes = state.get("attributes") or {}
+    if not attributes:
+        state["status_message"] = (
+            "I couldn't detect a clothing item in that photo at all. Could "
+            "you upload a clear, well-lit photo showing a single garment?"
+        )
+        _log(state, "branch: no garment detected -> asked user to re-upload")
+    else:
+        state["status_message"] = (
+            "I could see something there, but couldn't confidently read all "
+            f"the details (confidence {state['vision_confidence']}). Could "
+            "you try a clearer, well-lit photo of the item?"
+        )
+        _log(state, "branch: low confidence -> asked user to re-upload")
     return state
 
 
