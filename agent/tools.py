@@ -559,7 +559,7 @@ def build_complementary_query(attributes: dict, broaden: bool = False,
         "https://api.studio.nebius.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
         json={
-            "model": "meta-llama/Llama-3.3-70B-Instruct",
+            "model": "nvidia/Nemotron-3_5-Lightning",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -899,7 +899,7 @@ def _generate_styling_note(top_candidates: list, attributes: dict) -> str:
             "https://api.studio.nebius.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={
-                "model": "meta-llama/Llama-3.3-70B-Instruct",
+                "model": "nvidia/Nemotron-3_5-Lightning",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
