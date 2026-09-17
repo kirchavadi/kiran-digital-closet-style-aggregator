@@ -39,7 +39,7 @@ import uuid
 import streamlit as st
 
 from graph import build_graph
-from tools import get_saved_closet_items
+from tools import get_saved_closet_items, get_user_preferences
 
 st.set_page_config(page_title="Kiran's Digital Closet", page_icon="\U0001F457", layout="wide")
 
@@ -253,6 +253,18 @@ def page_my_closet():
 
 def page_preferences():
     st.title("Preferences")
+
+    current = get_user_preferences(st.session_state["user_id"])
+    with st.container(border=True):
+        st.caption(f"Currently on file for profile: {st.session_state['user_id']}")
+        disliked = current.get("disliked_colors") or []
+        brands = current.get("preferred_brands") or []
+        budget = current.get("budget_max")
+        st.write(f"Disliked colors: {', '.join(disliked) if disliked else 'none'}")
+        st.write(f"Preferred brands: {', '.join(brands) if brands else 'none'}")
+        if budget is not None:
+            st.write(f"Budget max: ${budget:,.2f}")
+
     st.write(
         "Tell the assistant about a style preference -- a disliked color, a "
         "favorite brand, a budget. It asks for your approval before "

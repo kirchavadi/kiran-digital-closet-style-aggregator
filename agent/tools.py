@@ -852,11 +852,17 @@ def get_user_preferences(user_id: str) -> dict:
 def rank_and_style(candidates: list, preferences: dict,
                    attributes: dict = None) -> tuple[list, str]:
     """
-    Filters out over-budget candidates, deprioritizes (never drops)
-    disliked colors, and lightly boosts preferred brands -- then asks
-    Llama-3.3-70B (Nebius) to write a short styling note grounded in the
-    actual owned-item attributes and top-ranked candidates. Never raises:
-    styling-copy failures fall back to deterministic copy from real names.
+    Filters out over-budget candidates, hard-excludes disliked colors, and
+    lightly boosts preferred brands -- then asks Llama-3.3-70B (Nebius) to
+    write a short styling note grounded in the actual owned-item attributes
+    and top-ranked candidates. Never raises: styling-copy failures fall
+    back to deterministic copy from real names.
+
+    Disliked-color exclusion is permissive by design (same philosophy as
+    the target_category post-filter in search_brand_inventory): if
+    excluding disliked colors would leave zero candidates, the exclusion
+    is skipped and the full affordable list is used instead, rather than
+    showing the user a blank result over a soft style preference.
     """
     attributes = attributes or {}
     budget_max = preferences.get("budget_max", 9999)
@@ -865,13 +871,18 @@ def rank_and_style(candidates: list, preferences: dict,
 
     affordable = [c for c in candidates if c.get("price", 0) <= budget_max]
 
-    def _rank_key(candidate):
+    def _has_disliked_color(candidate):
         name_low = (candidate.get("name") or "").lower()
-        penalty = 0.15 if any(dc in name_low for dc in disliked_colors) else 0.0
-        bonus = 0.05 if (candidate.get("brand") or "").lower() in preferred_brands else 0.0
-        return candidate.get("score", 0.0) - penalty + bonus
+        return any(dc in name_low for dc in disliked_colors)
 
-    ranked = sorted(affordable, key=_rank_key, reverse=True)
+    without_disliked = [c for c in affordable if not _has_disliked_color(c)]
+    eligible = without_disliked if without_disliked else affordable
+
+    def _rank_key(candidate):
+        bonus = 0.05 if (candidate.get("brand") or "").lower() in preferred_brands else 0.0
+        return candidate.get("score", 0.0) + bonus
+
+    ranked = sorted(eligible, key=_rank_key, reverse=True)
     note = _generate_styling_note(ranked[:3], attributes)
     return ranked, note
 
