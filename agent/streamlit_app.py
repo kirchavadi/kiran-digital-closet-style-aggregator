@@ -39,7 +39,7 @@ import uuid
 import streamlit as st
 
 from graph import build_graph
-from tools import get_saved_closet_items, get_user_preferences
+from tools import _CLOSET_DIR as CLOSET_DATA_DIR, get_saved_closet_items, get_user_preferences
 
 st.set_page_config(page_title="Kiran's Digital Closet", page_icon="\U0001F457", layout="wide")
 
@@ -69,19 +69,66 @@ def _init_session_state():
         "pref_result": None,
         "pref_text": "",
         "pref_stage": "idle",  # idle -> awaiting_approval -> done / failed
+        "processing": False,
+        "pending_invoke": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
+def _list_known_profiles() -> list:
+    # Profiles = user_ids that already have a saved-closet JSON file, plus
+    # whichever user_id is currently selected (so a brand-new profile name
+    # you just typed doesn't vanish from the list before its first save).
+    # Reuses tools.py's own closet-directory constant (_CLOSET_DIR) rather
+    # than reconstructing the path, so this can never drift from where
+    # save_to_digital_closet actually writes.
+    profiles = set()
+    if os.path.isdir(CLOSET_DATA_DIR):
+        for fname in os.listdir(CLOSET_DATA_DIR):
+            if fname.endswith(".json"):
+                profiles.add(fname[:-len(".json")])
+    profiles.add(st.session_state.get("user_id", "kiran-demo-user"))
+    return sorted(profiles)
+
+
 _init_session_state()
 app = get_app()
 
+NEW_PROFILE_OPTION = "+ New profile..."
+
 with st.sidebar:
     st.header("\U0001F457 Digital Closet")
-    st.session_state["user_id"] = st.text_input("User ID", value=st.session_state["user_id"])
-    page = st.radio("Go to", ["Upload & Recommend", "My Closet", "Preferences"])
+    processing = st.session_state.get("processing", False)
+
+    profile_options = _list_known_profiles() + [NEW_PROFILE_OPTION]
+    current_user_id = st.session_state["user_id"]
+    default_index = (
+        profile_options.index(current_user_id) if current_user_id in profile_options else 0
+    )
+    # key= gives the selectbox a stable identity. Without it, Streamlit derives
+    # the widget's identity from its options/index, and those change the moment
+    # a new profile name is typed -- so the first pick made right afterwards was
+    # silently discarded (found in a dry-run test of the merged file).
+    chosen_profile = st.selectbox(
+        "Profile", profile_options, index=default_index, key="profile_choice",
+        disabled=processing,
+    )
+    if chosen_profile == NEW_PROFILE_OPTION:
+        new_profile_name = st.text_input(
+            "New profile name", placeholder="e.g. jordan", disabled=processing
+        )
+        if new_profile_name.strip():
+            st.session_state["user_id"] = new_profile_name.strip()
+    else:
+        st.session_state["user_id"] = chosen_profile
+
+    page = st.radio(
+        "Go to", ["Upload & Recommend", "My Closet", "Preferences"], disabled=processing
+    )
+    if processing:
+        st.caption("\u23f3 Processing your last upload -- navigation is paused until it finishes.")
     st.caption(
         "Same agent graph as demo.py -- this UI just drives build_graph() "
         "from widgets instead of a script."
@@ -135,52 +182,83 @@ def page_upload_and_recommend():
         "to the brand's own site."
     )
 
-    uploaded_file = st.file_uploader("Upload a photo", type=["jpg", "jpeg", "png"])
+    processing = st.session_state.get("processing", False)
 
-    if uploaded_file is not None:
+    uploaded_file = st.file_uploader(
+        "Upload a photo", type=["jpg", "jpeg", "png"], disabled=processing
+    )
+
+    if uploaded_file is not None and not processing:
         sig = f"{uploaded_file.name}:{uploaded_file.size}"
         if sig != st.session_state["uploaded_file_sig"]:
             # A genuinely new upload (not just a rerun triggered by some
-            # other widget) -- save it and start a fresh graph thread.
+            # other widget) -- save it, then IMMEDIATELY set processing=True
+            # and rerun BEFORE calling the graph. This is deliberate: Streamlit
+            # reruns the whole script on every widget interaction, and a new
+            # interaction (like clicking a different sidebar page) cancels
+            # whatever script run is currently in flight -- including a
+            # blocking app.invoke() call. If we called invoke() inline in
+            # THIS run, the sidebar the user sees was already sent to the
+            # browser enabled (it was drawn earlier in this same run, before
+            # we knew we needed to lock it), so clicking away mid-upload
+            # would silently kill the request and lose the result. Rerunning
+            # first means the NEXT run's sidebar is drawn with navigation
+            # disabled from the start, before the slow call ever begins.
             image_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{uploaded_file.name}")
             with open(image_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
             thread_id = f"streamlit-{st.session_state['user_id']}-{uuid.uuid4().hex[:8]}"
-            config = {"configurable": {"thread_id": thread_id}}
-            initial = {"image_path": image_path, "user_id": st.session_state["user_id"]}
-
-            status_placeholder = st.empty()
-            with status_placeholder.container():
-                _, center_col, _ = st.columns([1, 2, 1])
-                with center_col:
-                    st.markdown(
-                        """
-                        <div style="
-                            text-align:center;
-                            padding:1.25rem 1rem;
-                            border-radius:12px;
-                            border:2px solid #FF8C00;
-                            background-color:rgba(255,140,0,0.15);
-                        ">
-                            <div style="font-size:1.4rem; font-weight:700;">
-                                🔎 Reading the photo and finding pairings...
-                            </div>
-                            <div style="font-size:0.95rem; margin-top:0.4rem; opacity:0.85;">
-                                This takes a few seconds -- please wait.
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-            result = app.invoke(initial, config)
-            status_placeholder.empty()
-
             st.session_state["uploaded_file_sig"] = sig
             st.session_state["uploaded_image_path"] = image_path
             st.session_state["upload_thread_id"] = thread_id
-            st.session_state["upload_result"] = result
             st.session_state["upload_saved_item_id"] = None
+            st.session_state["pending_invoke"] = {
+                "image_path": image_path,
+                "user_id": st.session_state["user_id"],
+                "thread_id": thread_id,
+            }
+            st.session_state["processing"] = True
+            st.rerun()
+
+    if st.session_state.get("processing") and st.session_state.get("pending_invoke"):
+        pending = st.session_state["pending_invoke"]
+        config = {"configurable": {"thread_id": pending["thread_id"]}}
+        initial = {"image_path": pending["image_path"], "user_id": pending["user_id"]}
+
+        status_placeholder = st.empty()
+        with status_placeholder.container():
+            _, center_col, _ = st.columns([1, 2, 1])
+            with center_col:
+                st.markdown(
+                    """
+                    <div style="
+                        text-align:center;
+                        padding:1.25rem 1rem;
+                        border-radius:12px;
+                        border:2px solid #FF8C00;
+                        background-color:rgba(255,140,0,0.15);
+                    ">
+                        <div style="font-size:1.4rem; font-weight:700;">
+                            🔎 Reading the photo and finding pairings...
+                        </div>
+                        <div style="font-size:0.95rem; margin-top:0.4rem; opacity:0.85;">
+                            This takes a few seconds -- please wait. Navigation is
+                            locked until this finishes so your upload can't be
+                            interrupted.
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        try:
+            result = app.invoke(initial, config)
+            st.session_state["upload_result"] = result
+        finally:
+            st.session_state["processing"] = False
+            st.session_state["pending_invoke"] = None
+        status_placeholder.empty()
+        st.rerun()
 
     result = st.session_state["upload_result"]
     if result is None:
