@@ -34,6 +34,7 @@ Requires the same environment variables demo.py already needs
 """
 
 import os
+import re
 import uuid
 
 import streamlit as st
@@ -93,6 +94,42 @@ def _list_known_profiles() -> list:
     return sorted(profiles)
 
 
+def _normalize_profile_name(raw: str) -> str:
+    # Lowercase letters, digits, "_", "." and "-" only -- the same character set
+    # tools.py's _closet_file_path allows, so the profile name, the closet
+    # filename and the Mem0 user_id are always identical (no silent "Kiran C"
+    # vs "Kiran_C" drift).
+    name = re.sub(r"[^a-z0-9_.-]+", "-", raw.strip().lower()).strip("-._")
+    return name[:40].strip("-._")
+
+
+def _create_profile():
+    # form_submit_button on_click callback. Callbacks run BEFORE the script
+    # reruns, which is the only moment Streamlit allows changing a widget's own
+    # session-state value (here: the Profile dropdown, so it lands on the new
+    # profile). Writing an empty closet file is what makes the profile
+    # "exist": _list_known_profiles() finds it on every later run, so the new
+    # profile stays in the dropdown even before its first saved item.
+    name = _normalize_profile_name(st.session_state.get("new_profile_name", ""))
+    if not name:
+        st.session_state["profile_notice"] = ("warning", "Type a profile name first.")
+        return
+    os.makedirs(CLOSET_DATA_DIR, exist_ok=True)
+    path = os.path.join(CLOSET_DATA_DIR, f"{name}.json")
+    already_existed = os.path.exists(path)
+    if not already_existed:
+        with open(path, "w") as f:
+            f.write("[]")
+    st.session_state["user_id"] = name
+    st.session_state["profile_choice"] = name
+    st.session_state["new_profile_name"] = ""
+    st.session_state["profile_notice"] = (
+        "info" if already_existed else "success",
+        f"Switched to existing profile: {name}" if already_existed
+        else f"Created profile: {name}",
+    )
+
+
 _init_session_state()
 app = get_app()
 
@@ -103,24 +140,34 @@ with st.sidebar:
     processing = st.session_state.get("processing", False)
 
     profile_options = _list_known_profiles() + [NEW_PROFILE_OPTION]
-    current_user_id = st.session_state["user_id"]
-    default_index = (
-        profile_options.index(current_user_id) if current_user_id in profile_options else 0
-    )
-    # key= gives the selectbox a stable identity. Without it, Streamlit derives
-    # the widget's identity from its options/index, and those change the moment
-    # a new profile name is typed -- so the first pick made right afterwards was
-    # silently discarded (found in a dry-run test of the merged file).
-    chosen_profile = st.selectbox(
-        "Profile", profile_options, index=default_index, key="profile_choice",
-        disabled=processing,
-    )
-    if chosen_profile == NEW_PROFILE_OPTION:
-        new_profile_name = st.text_input(
-            "New profile name", placeholder="e.g. jordan", disabled=processing
+    # The dropdown's value lives in session state under key="profile_choice"
+    # (stable widget identity; also lets _create_profile move the dropdown to
+    # the new profile). Make sure the stored value is still a valid option.
+    if st.session_state.get("profile_choice") not in profile_options:
+        current = st.session_state["user_id"]
+        st.session_state["profile_choice"] = (
+            current if current in profile_options else profile_options[0]
         )
-        if new_profile_name.strip():
-            st.session_state["user_id"] = new_profile_name.strip()
+    chosen_profile = st.selectbox(
+        "Profile", profile_options, key="profile_choice", disabled=processing
+    )
+
+    notice = st.session_state.pop("profile_notice", None)
+    if notice:
+        getattr(st, notice[0])(notice[1])
+
+    if chosen_profile == NEW_PROFILE_OPTION:
+        # A profile is only created when Create is pressed (or Enter, since this
+        # is a form). Until then the app keeps using the current profile.
+        with st.form("new_profile_form", border=False):
+            st.text_input(
+                "New profile name", placeholder="e.g. jordan",
+                key="new_profile_name", disabled=processing,
+            )
+            st.form_submit_button(
+                "Create profile", on_click=_create_profile, disabled=processing
+            )
+        st.caption(f"Still using profile: {st.session_state['user_id']}")
     else:
         st.session_state["user_id"] = chosen_profile
 
