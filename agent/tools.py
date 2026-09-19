@@ -596,7 +596,7 @@ def build_complementary_query(attributes: dict, broaden: bool = False,
 # match, not an exact one, and it's permissive on anything it can't
 # confidently judge, rather than restrictive.
 CATEGORY_KEYWORDS = {
-    "tops": ["top", "blouse", "shirt", "tee", "tank", "cami", "sweater",
+    "tops": ["top", "blouse", "shirt", "tee", "tank", "cami", "camisole", "sweater",
              "sweatshirt", "hoodie", "bodysuit"],
     "bottoms": ["bottom", "pant", "trouser", "short", "jean", "skirt",
                 "skort", "legging"],
@@ -606,45 +606,44 @@ CATEGORY_KEYWORDS = {
                      "scarf", "hat"],
 }
 
+_CATEGORY_PATTERNS = {
+    cat: [re.compile(r"\b" + re.escape(kw) + r"(?:es|s)?\b") for kw in kws]
+    for cat, kws in CATEGORY_KEYWORDS.items()
+}
+
+
+def _head_category(text):
+    """Category of the LAST garment word in the text (product names end with
+    the garment noun: 'Cami Tie-Front Palazzo Pants' -> bottoms). A trailing
+    ' - Colorway' is ignored when the part before it names a garment."""
+    low = text.lower()
+    head = low.split(" - ")[0]
+    for candidate_text in (head, low):
+        best_pos, best_cat = -1, None
+        for cat, patterns in _CATEGORY_PATTERNS.items():
+            for pat in patterns:
+                for m in pat.finditer(candidate_text):
+                    if m.start() > best_pos:
+                        best_pos, best_cat = m.start(), cat
+        if best_cat is not None:
+            return best_cat
+    return None
+
 
 def _category_matches_target(candidate_category: str, target_category: str,
                              candidate_name: str = "") -> bool:
-    """
-    Checks candidate_name FIRST, falling back to candidate_category only
-    when name gives no signal. This order is deliberate: live testing
-    (Sept 13) found real catalog records where category confidently
-    states the WRONG macro-category (e.g. a maxi skirt filed under
-    category="Tops") -- checking category first let those records slip
-    through undetected. name is free text but is directly authored per
-    product and reliably contains the actual garment word, making it the
-    more trustworthy signal for this catalog.
-
-    For each text source in turn: a match against the TARGET category's
-    own keywords is a confident keep; a match against a DIFFERENT
-    category's keywords is a confident exclude; no match at all moves on
-    to the next text source. If neither gives any signal, permissive
-    default still applies -- don't punish incomplete data, don't guess.
-    """
     if not target_category:
         return True
-    target_category = target_category.lower()
-    keywords = CATEGORY_KEYWORDS.get(target_category)
-    if not keywords:
+    target = target_category.lower()
+    if target not in CATEGORY_KEYWORDS:
         return True
-
     for text in (candidate_name, candidate_category):
         if not text:
             continue
-        low = text.lower()
-        if any(kw in low for kw in keywords):
-            return True
-        for other_cat, other_kws in CATEGORY_KEYWORDS.items():
-            if other_cat == target_category:
-                continue
-            if any(kw in low for kw in other_kws):
-                return False
-
-    return True
+        head = _head_category(text)
+        if head is not None:
+            return head == target
+    return True  # no signal from either field -> stay permissive
 
 
 # ----------------------------------------------------------------------
