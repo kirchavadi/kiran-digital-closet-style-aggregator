@@ -94,7 +94,7 @@ def render_candidate_card(item: dict, container):
         if item.get("brand"):
             st.caption(item["brand"])
         if item.get("display_mode") == "photo" and item.get("image_url"):
-            st.image(item["image_url"], use_container_width=True)
+            st.image(item["image_url"], width="stretch")
         else:
             st.caption("(no image available for this item)")
         price = item.get("price")
@@ -239,7 +239,7 @@ def page_my_closet():
             if item.get("brand"):
                 st.caption(item["brand"])
             if item.get("display_mode") == "photo" and item.get("image_url"):
-                st.image(item["image_url"], use_container_width=True)
+                st.image(item["image_url"], width="stretch")
             price = item.get("price")
             if price is not None:
                 st.write(f"${price:,.2f}")
