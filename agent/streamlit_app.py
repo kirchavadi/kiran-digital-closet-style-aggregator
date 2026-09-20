@@ -47,6 +47,47 @@ st.set_page_config(page_title="Kiran's Digital Closet", page_icon="\U0001F457", 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ---- Soft Autumn palette (Sept 19 2026) -------------------------------------
+# Base colors live in agent/.streamlit/config.toml ([theme] and [theme.sidebar]).
+# This CSS adds only what a theme can't: tinted sidebar sections, the full-page
+# loading overlay, and hiding Streamlit's own top-right "running" indicator.
+#   Terracotta #C1694F | Cream #FBF4EA | Taupe #E4D8C8 | Text #3B2A20
+#   Blush #F5DCCF | Sage #E2E8D9 | Aqua #DCE6EC (reserved for the Filters section)
+_PALETTE_CSS = """
+<style>
+[data-testid="stStatusWidget"] { display: none !important; }
+.st-key-sb_profile, .st-key-sb_nav, .st-key-sb_filters {
+    border-radius: 12px; padding: 0.75rem 0.9rem; margin-bottom: 0.75rem;
+}
+.st-key-sb_profile { background: #F5DCCF; }
+.st-key-sb_nav { background: #E2E8D9; }
+.st-key-sb_filters { background: #DCE6EC; }
+.st-key-prefs_on_file, .st-key-styling_note { background: #F5DCCF; border-radius: 12px; }
+/* info boxes (e.g. "Nothing saved yet") in Aqua instead of Streamlit blue; errors/warnings/success untouched */
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) { background-color: #DCE6EC !important; }
+[data-testid="stAlertContentInfo"], [data-testid="stAlertContentInfo"] * { color: #3B2A20 !important; }
+.dc-overlay {
+    position: fixed; inset: 0; z-index: 1000000;
+    background: rgba(59, 42, 32, 0.55);
+    display: flex; align-items: center; justify-content: center;
+}
+.dc-card {
+    background: #FBF4EA; border: 2px solid #C1694F; border-radius: 16px;
+    padding: 1.75rem 2.25rem; max-width: 30rem; text-align: center; color: #3B2A20;
+    box-shadow: 0 12px 40px rgba(59, 42, 32, 0.35);
+}
+.dc-spinner {
+    width: 46px; height: 46px; margin: 0 auto 1rem auto;
+    border: 5px solid #F0D9CD; border-top-color: #C1694F; border-radius: 50%;
+    animation: dc-spin 0.9s linear infinite;
+}
+.dc-title { font-size: 1.35rem; font-weight: 700; }
+.dc-sub { font-size: 0.95rem; margin-top: 0.5rem; opacity: 0.85; }
+@keyframes dc-spin { to { transform: rotate(360deg); } }
+</style>
+"""
+st.html(_PALETTE_CSS)
+
 
 @st.cache_resource
 def get_app():
@@ -139,43 +180,45 @@ with st.sidebar:
     st.header("\U0001F457 Digital Closet")
     processing = st.session_state.get("processing", False)
 
-    profile_options = _list_known_profiles() + [NEW_PROFILE_OPTION]
-    # The dropdown's value lives in session state under key="profile_choice"
-    # (stable widget identity; also lets _create_profile move the dropdown to
-    # the new profile). Make sure the stored value is still a valid option.
-    if st.session_state.get("profile_choice") not in profile_options:
-        current = st.session_state["user_id"]
-        st.session_state["profile_choice"] = (
-            current if current in profile_options else profile_options[0]
+    with st.container(key="sb_profile"):
+        profile_options = _list_known_profiles() + [NEW_PROFILE_OPTION]
+        # The dropdown's value lives in session state under key="profile_choice"
+        # (stable widget identity; also lets _create_profile move the dropdown to
+        # the new profile). Make sure the stored value is still a valid option.
+        if st.session_state.get("profile_choice") not in profile_options:
+            current = st.session_state["user_id"]
+            st.session_state["profile_choice"] = (
+                current if current in profile_options else profile_options[0]
+            )
+        chosen_profile = st.selectbox(
+            "Profile", profile_options, key="profile_choice", disabled=processing
         )
-    chosen_profile = st.selectbox(
-        "Profile", profile_options, key="profile_choice", disabled=processing
-    )
 
-    notice = st.session_state.pop("profile_notice", None)
-    if notice:
-        getattr(st, notice[0])(notice[1])
+        notice = st.session_state.pop("profile_notice", None)
+        if notice:
+            getattr(st, notice[0])(notice[1])
 
-    if chosen_profile == NEW_PROFILE_OPTION:
-        # A profile is only created when Create is pressed (or Enter, since this
-        # is a form). Until then the app keeps using the current profile.
-        with st.form("new_profile_form", border=False):
-            st.text_input(
-                "New profile name", placeholder="e.g. jordan",
-                key="new_profile_name", disabled=processing,
-            )
-            st.form_submit_button(
-                "Create profile", on_click=_create_profile, disabled=processing
-            )
-        st.caption(f"Still using profile: {st.session_state['user_id']}")
-    else:
-        st.session_state["user_id"] = chosen_profile
+        if chosen_profile == NEW_PROFILE_OPTION:
+            # A profile is only created when Create is pressed (or Enter, since this
+            # is a form). Until then the app keeps using the current profile.
+            with st.form("new_profile_form", border=False):
+                st.text_input(
+                    "New profile name", placeholder="e.g. jordan",
+                    key="new_profile_name", disabled=processing,
+                )
+                st.form_submit_button(
+                    "Create profile", on_click=_create_profile, disabled=processing
+                )
+            st.caption(f"Still using profile: {st.session_state['user_id']}")
+        else:
+            st.session_state["user_id"] = chosen_profile
 
-    page = st.radio(
-        "Go to", ["Upload & Recommend", "My Closet", "Preferences"], disabled=processing
-    )
-    if processing:
-        st.caption("\u23f3 Processing your last upload -- navigation is paused until it finishes.")
+    with st.container(key="sb_nav"):
+        page = st.radio(
+            "Go to", ["Upload & Recommend", "My Closet", "Preferences"], disabled=processing
+        )
+        if processing:
+            st.caption("\u23f3 Processing your last upload -- navigation is paused until it finishes.")
     st.caption(
         "Same agent graph as demo.py -- this UI just drives build_graph() "
         "from widgets instead of a script."
@@ -274,30 +317,17 @@ def page_upload_and_recommend():
         initial = {"image_path": pending["image_path"], "user_id": pending["user_id"]}
 
         status_placeholder = st.empty()
-        with status_placeholder.container():
-            _, center_col, _ = st.columns([1, 2, 1])
-            with center_col:
-                st.markdown(
-                    """
-                    <div style="
-                        text-align:center;
-                        padding:1.25rem 1rem;
-                        border-radius:12px;
-                        border:2px solid #FF8C00;
-                        background-color:rgba(255,140,0,0.15);
-                    ">
-                        <div style="font-size:1.4rem; font-weight:700;">
-                            🔎 Reading the photo and finding pairings...
-                        </div>
-                        <div style="font-size:0.95rem; margin-top:0.4rem; opacity:0.85;">
-                            This takes a few seconds -- please wait. Navigation is
-                            locked until this finishes so your upload can't be
-                            interrupted.
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        # Full-page overlay (see _PALETTE_CSS). It also blocks clicks, which backs up
+        # the disabled sidebar while the graph runs.
+        status_placeholder.markdown(
+            '<div class="dc-overlay"><div class="dc-card">'
+            '<div class="dc-spinner"></div>'
+            '<div class="dc-title">Reading the photo and finding pairings...</div>'
+            '<div class="dc-sub">This takes a few seconds -- please wait. '
+            "Navigation is locked until this finishes.</div>"
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
         try:
             result = app.invoke(initial, config)
             st.session_state["upload_result"] = result
@@ -336,7 +366,8 @@ def page_upload_and_recommend():
         return
 
     if result.get("styling_note"):
-        st.info(result["styling_note"])
+        with st.container(border=True, key="styling_note"):
+            st.markdown(result["styling_note"])
 
     recommendations = result.get("ranked_recommendations") or []
     if not recommendations:
@@ -380,8 +411,8 @@ def page_preferences():
     st.title("Preferences")
 
     current = get_user_preferences(st.session_state["user_id"])
-    with st.container(border=True):
-        st.caption(f"Currently on file for profile: {st.session_state['user_id']}")
+    with st.container(border=True, key="prefs_on_file"):
+        st.markdown(f"#### Currently on file for profile: {st.session_state['user_id']}")
         disliked = current.get("disliked_colors") or []
         brands = current.get("preferred_brands") or []
         budget = current.get("budget_max")
