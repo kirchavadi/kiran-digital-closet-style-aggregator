@@ -47,7 +47,10 @@ IMAGE_INDEX_NAME = "clip-index"
 NAMESPACE = "products"
 TEXT_TOP_K = 15
 IMAGE_TOP_K = 15
-FINAL_TOP_K = 10
+FINAL_TOP_K = 20  # candidate POOL; rank_and_style trims to MAX_RECOMMENDATIONS
+                  # after budget/disliked-color filtering, so a color dislike
+                  # doesn't leave only 1-2 cards out of a pool of 10
+MAX_RECOMMENDATIONS = 6
 TEXT_ONLY_RANK_PENALTY = 0.05
 
 
@@ -811,7 +814,9 @@ def _extract_preferences_from_memories(memory_texts: list) -> dict:
         is_negative = any(neg in low for neg in NEGATION_PHRASES)
         if is_negative:
             for color in COMMON_COLOR_WORDS:
-                if color in low:
+                # whole-word match: plain substring made "tan" fire on
+                # "important" and "red" on "tired"/"hundred"
+                if re.search(r"\b" + re.escape(color) + r"\b", low):
                     disliked_colors.add(color)
 
         for brand_name, domain in BRAND_NAME_TO_DOMAIN.items():
@@ -848,6 +853,70 @@ def get_user_preferences(user_id: str) -> dict:
 # Orchestration LLM: ranking + styling copy
 # ----------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
+# Color families for disliked-color exclusion (added Sept 19 2026)
+# ----------------------------------------------------------------------
+# Pinecone has no `color` field, so a disliked color is enforced by reading the
+# product NAME. Disliking a color FAMILY ("green") should also exclude its
+# shades ("Dark Olive", "Sage", "Emerald") -- the old plain-substring check
+# only caught the literal word. A dislike of a specific shade ("olive") stays
+# that shade only. Teal/turquoise/aqua count as both blue and green.
+_COLOR_FAMILY_SHADES = {
+    "green": ["green", "olive", "sage", "moss", "mossy", "emerald", "forest",
+              "hunter", "mint", "seafoam", "sea foam", "pistachio", "lime",
+              "jade", "avocado", "fern", "kelly", "eucalyptus", "chartreuse",
+              "celadon", "matcha", "teal", "turquoise", "aqua"],
+    "blue": ["blue", "navy", "cobalt", "cerulean", "sapphire", "indigo",
+             "azure", "periwinkle", "cyan", "teal", "turquoise", "aqua"],
+    "red": ["red", "scarlet", "crimson", "cherry", "ruby", "burgundy",
+            "maroon", "wine", "brick", "cranberry", "tomato", "raspberry"],
+    "orange": ["orange", "tangerine", "rust", "terracotta", "apricot",
+               "peach", "coral", "pumpkin"],
+    "yellow": ["yellow", "mustard", "lemon", "canary", "saffron"],
+    "pink": ["pink", "blush", "rose", "fuchsia", "magenta", "salmon",
+             "bubblegum"],
+    "purple": ["purple", "lavender", "lilac", "violet", "plum", "mauve",
+               "orchid", "amethyst", "eggplant", "grape"],
+    "brown": ["brown", "chocolate", "mocha", "chestnut", "espresso", "cocoa",
+              "cognac"],
+    "grey": ["grey", "gray", "charcoal", "slate", "graphite", "ash"],
+    "black": ["black", "onyx", "ebony"],
+    "white": ["white", "ivory", "off white", "snow", "alabaster"],
+    "beige": ["beige", "cream", "oatmeal", "sand", "ecru", "nude", "taupe"],
+}
+COLOR_FAMILIES = dict(_COLOR_FAMILY_SHADES)
+COLOR_FAMILIES["gray"] = COLOR_FAMILIES["grey"]
+
+
+def _letters_only(text: str) -> str:
+    """Lowercase, every run of non-letters -> one space ('Dark-Olive' -> 'dark olive')."""
+    return re.sub(r"[^a-z]+", " ", (text or "").lower()).strip()
+
+
+def _disliked_color_pattern(disliked_colors: list):
+    """Compile one whole-word regex covering the disliked colors plus, for a
+    family name, all of its shades. Returns None when nothing is disliked."""
+    terms = set()
+    for dc in disliked_colors:
+        dc = _letters_only(dc)
+        if not dc:
+            continue
+        terms.add(dc)
+        terms.update(COLOR_FAMILIES.get(dc, []))
+    if not terms:
+        return None
+    alternatives = sorted((_letters_only(t) for t in terms), key=len, reverse=True)
+    return re.compile(
+        r"(?<![a-z])(?:" + "|".join(re.escape(a) for a in alternatives) + r")s?(?![a-z])"
+    )
+
+
+def _name_has_disliked_color(name: str, pattern) -> bool:
+    """Whole-word match on the product name: 'Olivia' is not 'olive',
+    'Tailored' is not 'red', 'Stanford' is not 'tan'."""
+    return bool(pattern and pattern.search(_letters_only(name)))
+
+
 def rank_and_style(candidates: list, preferences: dict,
                    attributes: dict = None) -> tuple[list, str]:
     """
@@ -870,9 +939,10 @@ def rank_and_style(candidates: list, preferences: dict,
 
     affordable = [c for c in candidates if c.get("price", 0) <= budget_max]
 
+    disliked_pattern = _disliked_color_pattern(disliked_colors)
+
     def _has_disliked_color(candidate):
-        name_low = (candidate.get("name") or "").lower()
-        return any(dc in name_low for dc in disliked_colors)
+        return _name_has_disliked_color(candidate.get("name") or "", disliked_pattern)
 
     without_disliked = [c for c in affordable if not _has_disliked_color(c)]
     eligible = without_disliked if without_disliked else affordable
@@ -883,7 +953,7 @@ def rank_and_style(candidates: list, preferences: dict,
 
     ranked = sorted(eligible, key=_rank_key, reverse=True)
     note = _generate_styling_note(ranked[:3], attributes)
-    return ranked, note
+    return ranked[:MAX_RECOMMENDATIONS], note
 
 
 def _generate_styling_note(top_candidates: list, attributes: dict) -> str:
