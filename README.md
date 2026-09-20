@@ -6,8 +6,9 @@ Upload a top, get matching bottoms and accessories. Upload a bottom, get matchin
 
 Built as the Week 3 "Build Your AI Agent" submission for The Gen Academy certification track.
 
-<img width="2400" height="1350" alt="image" src="https://github.com/user-attachments/assets/1f041a5f-ff33-4c10-b5ad-5e3e0f765c56" />
+## How It Works at a Glance
 
+![How the Digital Closet finds your match: read the photo, find the missing piece, rank and hand off with human approval](docs/images/style-aggregator-flow.png)
 
 ## Agent Pattern
 
@@ -26,6 +27,10 @@ flowchart LR
 ```
 
 Every arrow is a real runtime decision, not a fixed handoff. The graph branches on vision confidence and on thin search results, retries a failed tool call once, and stops for explicit human approval before any write.
+
+## Architecture
+
+![System architecture: offline ingestion pipeline, Streamlit UI, LangGraph runtime agent, storage layer, and deferred v2 items](docs/images/architecture.png)
 
 ## Stack
 
