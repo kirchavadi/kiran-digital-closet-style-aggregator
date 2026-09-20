@@ -6,6 +6,9 @@ Upload a top, get matching bottoms and accessories. Upload a bottom, get matchin
 
 Built as the Week 3 "Build Your AI Agent" submission for The Gen Academy certification track.
 
+<img width="2400" height="1350" alt="image" src="https://github.com/user-attachments/assets/1f041a5f-ff33-4c10-b5ad-5e3e0f765c56" />
+
+
 ## Agent Pattern
 
 Single-agent pipeline -- one LangGraph state machine, not multiple peer agents and not a free-form ReAct loop:
