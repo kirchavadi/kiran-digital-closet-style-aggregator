@@ -1,8 +1,8 @@
 # Kiran's Digital Closet (Style Aggregator)
 
-A personalized AI stylist that takes a photo of one item you already own -- a top, a bottom, or an accessory -- and recommends real, purchasable pieces that complete the outfit around it, pulled from across seven partner apparel brands in one place.
+A personalized AI stylist that takes a photo of one item you already own -- a top or a bottom -- and recommends real, purchasable pieces that complete the outfit around it, pulled from across seven partner apparel brands in one place.
 
-Upload a top, get matching bottoms and accessories. Upload a bottom, get matching tops and accessories. The recommendation always points toward what is missing from the outfit, never toward more of the same garment. This is retrieval-based, not image generation, and it is deliberately not a similarity search.
+Upload a top, get matching bottoms. Upload a bottom, get matching tops. The recommendation always points toward what is missing from the outfit, never toward more of the same garment. This is retrieval-based, not image generation, and it is deliberately not a similarity search.
 
 Built as the Week 3 "Build Your AI Agent" submission for The Gen Academy certification track.
 
@@ -159,7 +159,7 @@ Scenario 8 writes a real preference to Mem0 for the user id `kiran-demo-user`.
 - Vision confidence too low -> ask the user to re-upload rather than proceed.
 - Vision provider hard failure -> retry once against the fallback provider before surfacing an error.
 - Too few search matches -> broaden the query once, then tell the user rather than fail silently.
-- Any tool error (timeout, dead link) -> retry once, then a plain-language message.
+- Any read-tool error (timeout, dead link) -> retry once, then a plain-language message. The two write tools never auto-retry, to avoid a double write.
 - Any write (`save_to_digital_closet`, `remember_user_preference`) -> pauses for explicit human approval first, always.
 
 ## Dataset
@@ -187,5 +187,5 @@ This keeps the agent autonomous for read, search and ranking work while making s
 ## Week 3 Deliverables
 
 - Code: this repository, branch `fix/category-head-noun-match`
-- Project documentation: Google Doc link to be added
-- Video demo: link to be added
+- Project documentation: [Week 3 Project Documentation](https://docs.google.com/document/d/1h8AQDW1LYn3ZS9TOXAwQaAfpmj_2fC7n/edit) and [The Agent Framework, field by field](https://docs.google.com/document/d/150cDnKnnn7Q65aac-agYiBFAiERxU6YL/edit)
+- Video demo: [Demo video](https://drive.google.com/file/d/1bgQAkA-FX0KD2kcd72I6P2VHfEfrSkJP/view?usp=drive_link)
