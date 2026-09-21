@@ -1,5 +1,7 @@
 # Kiran's Digital Closet (Style Aggregator)
 
+This project makes my life easier by saving me hours of browsing separate brands one at a time: I can find items, apply my saved preferences (like budget and disliked colors), and shop my favorite brands all in one place.
+
 A personalized AI stylist that takes a photo of one item you already own -- a top or a bottom -- and recommends real, purchasable pieces that complete the outfit around it, pulled from across seven partner apparel brands in one place.
 
 Upload a top, get matching bottoms. Upload a bottom, get matching tops. The recommendation always points toward what is missing from the outfit, never toward more of the same garment. This is retrieval-based, not image generation, and it is deliberately not a similarity search.
